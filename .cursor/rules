@@ -1,0 +1,28 @@
+This is the TouchPoint-FCC repo — a script library for TouchPoint church 
+management software.
+
+Context:
+- TouchPoint is a hosted SaaS platform with a built-in Python/SQL/HTML shell
+- Scripts are copy/pasted manually into TouchPoint to run — nothing deploys automatically
+- Database is Microsoft SQL Server, managed by TouchPoint (hosted)
+- No external DB connections — TouchPoint handles all DB access internally
+- Small writes/updates occur occasionally but majority of scripts are read-only
+
+Structure:
+- Reports/          — Python + SQL scripts for data reports
+- Dashboards/       — HTML/CSS for UX/UI visuals
+- SQLqueries/       — Standalone SQL queries
+- Widgets/          — Embeddable HTML/CSS widgets
+- HTMLsnippets/     — Small HTML components for emails and registration forms
+- OnEnrollScripts/  — Actions triggered automatically during registration/enrollment
+- _templates/       — Always copy from here when starting something ons:
+- Top level folders: Capitalized words (Reports/, Dashboards/, etc.)
+- Subfolders and script folders: camelCase (monthlyGivingReport/)
+- Script files: camelCase matching folder name (monthlyGivingReport.py)
+
+Rules:
+- Every script folder must have a README.md
+- SQL scripts that write data must clearly mark write risk in README
+- Never hardcode names, IDs, or any real data in scripts
+- All new scripts copied from _templates/ first
+- Commit using Conventional Commits format
