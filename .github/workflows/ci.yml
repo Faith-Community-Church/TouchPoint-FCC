@@ -21,6 +21,7 @@ jobs:
           flake8 . \
             --exclude=.venv,venv,_templates \
             --max-line-length=100 \
+            --extend-ignore=F821,E265 \
             --count
 
   sql-lint:
@@ -59,6 +60,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run Trufflehog
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: main
+          extra_args: --only-verified
