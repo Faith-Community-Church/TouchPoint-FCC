@@ -1,0 +1,15 @@
+{
+  "folders": [{ "path": ".", "name": "TouchPoint-FCC" }],
+  "settings": {
+    "editor.formatOnSave": true,
+    "files.autoSave": "afterDelay",
+    "files.autoSaveDelay": 2000,
+    "terminal.integrated.defaultProfile.osx": "zsh",
+    "explorer.fileNesting.enabled": true,
+    "explorer.fileNesting.patterns": {
+      "*.py": "${capture}.md",
+      "*.sql": "${capture}.md",
+      "*.html": "${capture}.md"
+    }
+  }
+}
