@@ -1,0 +1,9 @@
+<h4><span style="color:#2980b9;"><strong>Participation Waiver Instructions</strong></span></h4>
+
+<ul>
+	<li>Enter your (t<strong>he parent/guardian</strong>) email and click on &quot;<span style="color:#27ae60;"><strong>Request Signatures</strong></span>&quot;</li>
+	<li><strong>Go to your email inbox</strong> and follow the instructions to sign the participation waiver. <strong>The email will come from Dropbox Sign.</strong></li>
+	<li>Don&#39;t forget to check your Spam/Junk/Other folder if you aren&#39;t seeing the email</li>
+	<li>Once you have signed the document, <strong>return here to complete your registration.</strong></li>
+	<li><em>If you session times out, your progress will be saved.</em></li>
+</ul>
