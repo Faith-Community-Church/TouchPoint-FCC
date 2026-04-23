@@ -1,0 +1,270 @@
+{
+  "info": {
+    "_postman_id": "9c86f18f-44c0-40c0-ad5e-a1f6ed2c6d39",
+    "name": "BVCMS CmsApi",
+    "description": "Import-ready collection for CmsApi routes with shared auth diagnostics.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:7072/api"
+    },
+    {
+      "key": "cmsHost",
+      "value": "fcchudson"
+    },
+    {
+      "key": "pat",
+      "value": ""
+    },
+    {
+      "key": "functionsKey",
+      "value": ""
+    },
+    {
+      "key": "onBehalfOf",
+      "value": ""
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Collection-level auth bootstrap.",
+          "const authMode = (pm.variables.get('authMode') || 'pat').toLowerCase();",
+          "const baseUrl = pm.environment.get('baseUrl') || pm.collectionVariables.get('baseUrl');",
+          "const cmsHost = pm.environment.get('cmsHost') || pm.collectionVariables.get('cmsHost');",
+          "const pat = pm.environment.get('pat') || pm.collectionVariables.get('pat');",
+          "const functionsKey = pm.environment.get('functionsKey') || pm.collectionVariables.get('functionsKey');",
+          "const onBehalfOf = pm.environment.get('onBehalfOf') || pm.collectionVariables.get('onBehalfOf');",
+          "",
+          "if (!baseUrl) {",
+          "  throw new Error('Missing baseUrl. Set environment variable baseUrl.');",
+          "}",
+          "",
+          "if (!cmsHost) {",
+          "  throw new Error('Missing cmsHost. Set environment variable cmsHost.');",
+          "}",
+          "",
+          "pm.request.headers.upsert({ key: 'CmsHost', value: cmsHost });",
+          "pm.request.headers.upsert({ key: 'Accept', value: 'application/json' });",
+          "",
+          "if (authMode === 'pat') {",
+          "  if (!pat) {",
+          "    throw new Error('authMode=pat requires pat variable.');",
+          "  }",
+          "  pm.request.headers.upsert({ key: 'Authorization', value: `PAT ${pat}` });",
+          "}",
+          "",
+          "if (authMode === 'function') {",
+          "  if (!functionsKey) {",
+          "    throw new Error('authMode=function requires functionsKey variable.');",
+          "  }",
+          "  pm.request.headers.upsert({ key: 'x-functions-key', value: functionsKey });",
+          "}",
+          "",
+          "if (onBehalfOf) {",
+          "  pm.request.headers.upsert({ key: 'x-on-behalf-of', value: onBehalfOf });",
+          "}",
+          "",
+          "console.log('Auth mode:', authMode);"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "pm.test('Response time < 4000ms', function () {",
+          "  pm.expect(pm.response.responseTime).to.be.below(4000);",
+          "});",
+          "",
+          "const code = pm.response.code;",
+          "if (code === 401 || code === 403) {",
+          "  const authMode = (pm.variables.get('authMode') || 'pat').toLowerCase();",
+          "  console.warn('Auth failure diagnostics', {",
+          "    authMode: authMode,",
+          "    hasCmsHost: !!(pm.environment.get('cmsHost') || pm.collectionVariables.get('cmsHost')),",
+          "    hasPat: !!(pm.environment.get('pat') || pm.collectionVariables.get('pat')),",
+          "    hasFunctionsKey: !!(pm.environment.get('functionsKey') || pm.collectionVariables.get('functionsKey')),",
+          "    requestUrl: pm.request.url.toString(),",
+          "    status: code",
+          "  });",
+          "}",
+          "",
+          "pm.test('Status is not 5xx', function () {",
+          "  pm.expect(code).to.be.below(500);",
+          "});"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "PAT-Ready",
+      "item": [
+        {
+          "name": "Utilities - Ping",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.variables.set('authMode', 'pat');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/Utilities/Ping",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "Utilities",
+                "Ping"
+              ]
+            },
+            "description": "Basic health endpoint."
+          }
+        },
+        {
+          "name": "Integration - Search Contacts",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.variables.set('authMode', 'pat');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/Integration/Contacts?query={{contactQuery}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "Integration",
+                "Contacts"
+              ],
+              "query": [
+                {
+                  "key": "query",
+                  "value": "{{contactQuery}}"
+                }
+              ]
+            },
+            "description": "PAT-enabled integration contact search."
+          }
+        },
+        {
+          "name": "Tags - Add Person To Tag",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.variables.set('authMode', 'pat');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/Tags/{{tagId}}/Add/{{personId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "Tags",
+                "{{tagId}}",
+                "Add",
+                "{{personId}}"
+              ]
+            },
+            "description": "PAT-enabled tag mutation endpoint."
+          }
+        }
+      ]
+    },
+    {
+      "name": "FunctionKey-Required",
+      "item": [
+        {
+          "name": "Utilities - Get Server Configuration",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.variables.set('authMode', 'function');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/Utilities/GetServerConfiguration",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "Utilities",
+                "GetServerConfiguration"
+              ]
+            },
+            "description": "Function-level endpoint requiring x-functions-key."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Other-Auth-Needed",
+      "item": [
+        {
+          "name": "People - Get Person",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/People/{{peopleId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "People",
+                "{{peopleId}}"
+              ]
+            },
+            "description": "May require non-PAT auth depending on deployment settings."
+          }
+        }
+      ]
+    }
+  ]
+}
