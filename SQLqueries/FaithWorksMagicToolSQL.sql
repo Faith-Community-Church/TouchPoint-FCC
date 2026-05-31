@@ -13,6 +13,7 @@
 --      01 = PM
 --      02 = EVE
 --      03 = Monday Only, Family Day (displayed as Family Day in output)
+--      NA = Not Available (MonNA, TueNA, …); output is - when NA is the only tag for that day
 --   Skill prefixes: PRO_, LC_, INT_, NOV_, MC_ (displays value after underscore)
 --      PRO_ = Pro Skill
 --      LC_ = Licensed
@@ -71,87 +72,126 @@ SELECT
     p.CellPhone,
     p.EmailAddress AS [Email],
 
-    -- Day/Time Subgroups: Mon, Tue, Wed, Thu, Fri
-    -- Format: AM | PM | EVE | Family Day (00=AM, 01=PM, 02=EVE, 03=Monday-only Family Day per subgroup legend)
-    STUFF((
-        SELECT N' | ' + CASE RIGHT(mt.Name, 2)
-            WHEN N'00' THEN N'AM'
-            WHEN N'01' THEN N'PM'
-            WHEN N'02' THEN N'EVE'
-            WHEN N'03' THEN N'Family Day'
-            ELSE RIGHT(mt.Name, 2)
-        END
-        FROM dbo.OrgMemMemTags omm
-        JOIN dbo.MemberTags mt ON mt.Id = omm.MemberTagId AND mt.OrgId = omm.OrgId
-        WHERE omm.OrgId = rr.OrganizationId AND omm.PeopleId = p.PeopleId
-            AND mt.Name LIKE N'Mon%'
-        ORDER BY RIGHT(mt.Name, 2)
-        FOR XML PATH(N''), TYPE
-    ).value(N'.', N'nvarchar(max)'), 1, 3, N'') AS [Mon],
+    -- Day/Time: AM | PM | EVE | Family Day when selected; - when only *NA (Not Available); blank otherwise
+    COALESCE(
+        NULLIF(STUFF((
+            SELECT N' | ' + CASE RIGHT(mt.Name, 2)
+                WHEN N'00' THEN N'AM'
+                WHEN N'01' THEN N'PM'
+                WHEN N'02' THEN N'EVE'
+                WHEN N'03' THEN N'Family Day'
+            END
+            FROM dbo.OrgMemMemTags omm
+            JOIN dbo.MemberTags mt ON mt.Id = omm.MemberTagId AND mt.OrgId = omm.OrgId
+            WHERE omm.OrgId = rr.OrganizationId AND omm.PeopleId = p.PeopleId
+                AND mt.Name LIKE N'Mon%'
+                AND RIGHT(mt.Name, 2) IN (N'00', N'01', N'02', N'03')
+            ORDER BY RIGHT(mt.Name, 2)
+            FOR XML PATH(N''), TYPE
+        ).value(N'.', N'nvarchar(max)'), 1, 3, N''), N''),
+        (SELECT TOP 1 N'-'
+         FROM dbo.OrgMemMemTags omm
+         JOIN dbo.MemberTags mt ON mt.Id = omm.MemberTagId AND mt.OrgId = omm.OrgId
+         WHERE omm.OrgId = rr.OrganizationId AND omm.PeopleId = p.PeopleId
+             AND mt.Name LIKE N'Mon%'
+             AND RIGHT(mt.Name, 2) = N'NA')
+    ) AS [Mon],
 
-    STUFF((
-        SELECT N' | ' + CASE RIGHT(mt.Name, 2)
-            WHEN N'00' THEN N'AM'
-            WHEN N'01' THEN N'PM'
-            WHEN N'02' THEN N'EVE'
-            WHEN N'03' THEN N'Family Day'
-            ELSE RIGHT(mt.Name, 2)
-        END
-        FROM dbo.OrgMemMemTags omm
-        JOIN dbo.MemberTags mt ON mt.Id = omm.MemberTagId AND mt.OrgId = omm.OrgId
-        WHERE omm.OrgId = rr.OrganizationId AND omm.PeopleId = p.PeopleId
-            AND mt.Name LIKE N'Tue%'
-        ORDER BY RIGHT(mt.Name, 2)
-        FOR XML PATH(N''), TYPE
-    ).value(N'.', N'nvarchar(max)'), 1, 3, N'') AS [Tue],
+    COALESCE(
+        NULLIF(STUFF((
+            SELECT N' | ' + CASE RIGHT(mt.Name, 2)
+                WHEN N'00' THEN N'AM'
+                WHEN N'01' THEN N'PM'
+                WHEN N'02' THEN N'EVE'
+                WHEN N'03' THEN N'Family Day'
+            END
+            FROM dbo.OrgMemMemTags omm
+            JOIN dbo.MemberTags mt ON mt.Id = omm.MemberTagId AND mt.OrgId = omm.OrgId
+            WHERE omm.OrgId = rr.OrganizationId AND omm.PeopleId = p.PeopleId
+                AND mt.Name LIKE N'Tue%'
+                AND RIGHT(mt.Name, 2) IN (N'00', N'01', N'02', N'03')
+            ORDER BY RIGHT(mt.Name, 2)
+            FOR XML PATH(N''), TYPE
+        ).value(N'.', N'nvarchar(max)'), 1, 3, N''), N''),
+        (SELECT TOP 1 N'-'
+         FROM dbo.OrgMemMemTags omm
+         JOIN dbo.MemberTags mt ON mt.Id = omm.MemberTagId AND mt.OrgId = omm.OrgId
+         WHERE omm.OrgId = rr.OrganizationId AND omm.PeopleId = p.PeopleId
+             AND mt.Name LIKE N'Tue%'
+             AND RIGHT(mt.Name, 2) = N'NA')
+    ) AS [Tue],
 
-    STUFF((
-        SELECT N' | ' + CASE RIGHT(mt.Name, 2)
-            WHEN N'00' THEN N'AM'
-            WHEN N'01' THEN N'PM'
-            WHEN N'02' THEN N'EVE'
-            WHEN N'03' THEN N'Family Day'
-            ELSE RIGHT(mt.Name, 2)
-        END
-        FROM dbo.OrgMemMemTags omm
-        JOIN dbo.MemberTags mt ON mt.Id = omm.MemberTagId AND mt.OrgId = omm.OrgId
-        WHERE omm.OrgId = rr.OrganizationId AND omm.PeopleId = p.PeopleId
-            AND mt.Name LIKE N'Wed%'
-        ORDER BY RIGHT(mt.Name, 2)
-        FOR XML PATH(N''), TYPE
-    ).value(N'.', N'nvarchar(max)'), 1, 3, N'') AS [Wed],
+    COALESCE(
+        NULLIF(STUFF((
+            SELECT N' | ' + CASE RIGHT(mt.Name, 2)
+                WHEN N'00' THEN N'AM'
+                WHEN N'01' THEN N'PM'
+                WHEN N'02' THEN N'EVE'
+                WHEN N'03' THEN N'Family Day'
+            END
+            FROM dbo.OrgMemMemTags omm
+            JOIN dbo.MemberTags mt ON mt.Id = omm.MemberTagId AND mt.OrgId = omm.OrgId
+            WHERE omm.OrgId = rr.OrganizationId AND omm.PeopleId = p.PeopleId
+                AND mt.Name LIKE N'Wed%'
+                AND RIGHT(mt.Name, 2) IN (N'00', N'01', N'02', N'03')
+            ORDER BY RIGHT(mt.Name, 2)
+            FOR XML PATH(N''), TYPE
+        ).value(N'.', N'nvarchar(max)'), 1, 3, N''), N''),
+        (SELECT TOP 1 N'-'
+         FROM dbo.OrgMemMemTags omm
+         JOIN dbo.MemberTags mt ON mt.Id = omm.MemberTagId AND mt.OrgId = omm.OrgId
+         WHERE omm.OrgId = rr.OrganizationId AND omm.PeopleId = p.PeopleId
+             AND mt.Name LIKE N'Wed%'
+             AND RIGHT(mt.Name, 2) = N'NA')
+    ) AS [Wed],
 
-    STUFF((
-        SELECT N' | ' + CASE RIGHT(mt.Name, 2)
-            WHEN N'00' THEN N'AM'
-            WHEN N'01' THEN N'PM'
-            WHEN N'02' THEN N'EVE'
-            WHEN N'03' THEN N'Family Day'
-            ELSE RIGHT(mt.Name, 2)
-        END
-        FROM dbo.OrgMemMemTags omm
-        JOIN dbo.MemberTags mt ON mt.Id = omm.MemberTagId AND mt.OrgId = omm.OrgId
-        WHERE omm.OrgId = rr.OrganizationId AND omm.PeopleId = p.PeopleId
-            AND mt.Name LIKE N'Thu%'
-        ORDER BY RIGHT(mt.Name, 2)
-        FOR XML PATH(N''), TYPE
-    ).value(N'.', N'nvarchar(max)'), 1, 3, N'') AS [Thu],
+    COALESCE(
+        NULLIF(STUFF((
+            SELECT N' | ' + CASE RIGHT(mt.Name, 2)
+                WHEN N'00' THEN N'AM'
+                WHEN N'01' THEN N'PM'
+                WHEN N'02' THEN N'EVE'
+                WHEN N'03' THEN N'Family Day'
+            END
+            FROM dbo.OrgMemMemTags omm
+            JOIN dbo.MemberTags mt ON mt.Id = omm.MemberTagId AND mt.OrgId = omm.OrgId
+            WHERE omm.OrgId = rr.OrganizationId AND omm.PeopleId = p.PeopleId
+                AND mt.Name LIKE N'Thu%'
+                AND RIGHT(mt.Name, 2) IN (N'00', N'01', N'02', N'03')
+            ORDER BY RIGHT(mt.Name, 2)
+            FOR XML PATH(N''), TYPE
+        ).value(N'.', N'nvarchar(max)'), 1, 3, N''), N''),
+        (SELECT TOP 1 N'-'
+         FROM dbo.OrgMemMemTags omm
+         JOIN dbo.MemberTags mt ON mt.Id = omm.MemberTagId AND mt.OrgId = omm.OrgId
+         WHERE omm.OrgId = rr.OrganizationId AND omm.PeopleId = p.PeopleId
+             AND mt.Name LIKE N'Thu%'
+             AND RIGHT(mt.Name, 2) = N'NA')
+    ) AS [Thu],
 
-    STUFF((
-        SELECT N' | ' + CASE RIGHT(mt.Name, 2)
-            WHEN N'00' THEN N'AM'
-            WHEN N'01' THEN N'PM'
-            WHEN N'02' THEN N'EVE'
-            WHEN N'03' THEN N'Family Day'
-            ELSE RIGHT(mt.Name, 2)
-        END
-        FROM dbo.OrgMemMemTags omm
-        JOIN dbo.MemberTags mt ON mt.Id = omm.MemberTagId AND mt.OrgId = omm.OrgId
-        WHERE omm.OrgId = rr.OrganizationId AND omm.PeopleId = p.PeopleId
-            AND mt.Name LIKE N'Fri%'
-        ORDER BY RIGHT(mt.Name, 2)
-        FOR XML PATH(N''), TYPE
-    ).value(N'.', N'nvarchar(max)'), 1, 3, N'') AS [Fri],
+    COALESCE(
+        NULLIF(STUFF((
+            SELECT N' | ' + CASE RIGHT(mt.Name, 2)
+                WHEN N'00' THEN N'AM'
+                WHEN N'01' THEN N'PM'
+                WHEN N'02' THEN N'EVE'
+                WHEN N'03' THEN N'Family Day'
+            END
+            FROM dbo.OrgMemMemTags omm
+            JOIN dbo.MemberTags mt ON mt.Id = omm.MemberTagId AND mt.OrgId = omm.OrgId
+            WHERE omm.OrgId = rr.OrganizationId AND omm.PeopleId = p.PeopleId
+                AND mt.Name LIKE N'Fri%'
+                AND RIGHT(mt.Name, 2) IN (N'00', N'01', N'02', N'03')
+            ORDER BY RIGHT(mt.Name, 2)
+            FOR XML PATH(N''), TYPE
+        ).value(N'.', N'nvarchar(max)'), 1, 3, N''), N''),
+        (SELECT TOP 1 N'-'
+         FROM dbo.OrgMemMemTags omm
+         JOIN dbo.MemberTags mt ON mt.Id = omm.MemberTagId AND mt.OrgId = omm.OrgId
+         WHERE omm.OrgId = rr.OrganizationId AND omm.PeopleId = p.PeopleId
+             AND mt.Name LIKE N'Fri%'
+             AND RIGHT(mt.Name, 2) = N'NA')
+    ) AS [Fri],
 
     -- Skill Level Subgroups: PRO_, LC_, INT_, NOV_, MC_
     -- Value = everything after the prefix, | separator for multiple
