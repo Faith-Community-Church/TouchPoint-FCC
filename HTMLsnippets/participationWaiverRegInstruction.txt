@@ -4,7 +4,7 @@
 	<li>Enter your email and click on &quot;<span style="color:#27ae60;"><strong>Request Signatures</strong></span>&quot;</li>
 	<li><strong>Go to your email inbox</strong> and follow the instructions to sign the participation waiver. <strong>The email will come from Dropbox Sign.</strong></li>
 	<li>Once you have signed the document, <strong>return here to complete your registration.</strong></li>
-	<li><em>If you session times out, your progress will be saved.</em></li>
+	<li><em>If you session times out, use your cell phone number to sign back in to complete the registration.</em></li>
 </ul>
 
 <p><em>For technical issues with signing the digital waiver, please contact <a href="mailto:jpierson@fcchudson.com">Jake Pierson</a></em></p>
