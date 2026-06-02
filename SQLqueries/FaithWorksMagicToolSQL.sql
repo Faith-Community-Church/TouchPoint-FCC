@@ -21,6 +21,8 @@
 --      NOV_ = Nov Skill
 --   MC_ = Missional Community
 --   MC Project: Text question "Please tell us which MC project you're volunteering for"
+--   [Join Date]/[Join Time] = OrganizationMembers.EnrollmentDate when enrolled in reg org;
+--      else RegPeople.CompletedDate (MM/DD/YYYY, hh:mmam/pm). Not People.JoinDate (church join).
 
 DECLARE @OrganizationIdAdult INT = 1865;  -- FaithWorks Adult Volunteer Registration
 DECLARE @OrganizationIdMinor INT = 1878; -- FaithWorks Minor Volunteer Registration
@@ -69,8 +71,10 @@ SELECT
     p.LastName AS [Last],
     ISNULL(p.PreferredName, p.NickName) AS [Goes By],
     p.Age,
-    p.CellPhone,
+    dbo.FmtPhone(p.CellPhone) AS [CellPhone],
     p.EmailAddress AS [Email],
+    CONVERT(nvarchar(12), COALESCE(omEnroll.EnrollmentDate, rr.CompletedDate), 101) AS [Join Date],
+    LOWER(FORMAT(COALESCE(omEnroll.EnrollmentDate, rr.CompletedDate), N'hh:mmtt')) AS [Join Time],
 
     -- Day/Time: AM | PM | EVE | Family Day when selected; - when only *NA (Not Available); blank otherwise
     COALESCE(
@@ -250,6 +254,15 @@ SELECT
 
 FROM RankedRegs rr
 JOIN dbo.People p ON p.PeopleId = rr.PeopleId
+OUTER APPLY (
+    SELECT TOP 1 om.EnrollmentDate
+    FROM dbo.OrganizationMembers om
+    WHERE om.PeopleId = p.PeopleId
+        AND om.OrganizationId = rr.OrganizationId
+        AND ISNULL(om.Pending, 0) = 0
+        AND om.MemberTypeId NOT IN (230, 311)  -- InActive, Prospect
+    ORDER BY om.EnrollmentDate DESC
+) omEnroll
 WHERE rr.rn = 1
 
 ORDER BY [Minor or Adult], p.LastName, p.FirstName;
