@@ -76,11 +76,8 @@ End Sub
 
 ' Writes a fake header map to Parameters rows 200-260 so GetMappedColumn
 ' can be tested without running a real import.
-' Headers: Minor or Adult(1), Reg OrgId(2), First(3), Last(4), Goes By(5),
-'          Age(6), CellPhone(7), Email(8), Mon(9), Tue(10), Wed(11),
-'          Thu(12), Fri(13), Pro Skill(14), Licensed(15), Int Skill(16),
-'          Nov Skill(17), MC(18), MC Project(19)
-' Plus all canonical aliases.
+' Headers: TouchPoint cols 1-21 (Join Date/Time at 9-10), then Request(22),
+'          Job-Mon..Job-Fri(23-27). Plus canonical aliases.
 Private Sub MockHeaderMap()
     Dim p As Worksheet
     Set p = ThisWorkbook.Sheets(PARAM_SHEET)
@@ -90,8 +87,10 @@ Private Sub MockHeaderMap()
 
     Dim hdrs As Variant
     hdrs = Array("Minor or Adult", "Registration OrganizationId", "First", "Last", _
-                 "Goes By", "Age", "CellPhone", "Email", "Mon", "Tue", "Wed", "Thu", _
-                 "Fri", "Pro Skill", "Licensed", "Int Skill", "Nov Skill", "MC", "MC Project")
+                 "Goes By", "Age", "CellPhone", "Email", "Join Date", "Join Time", _
+                 "Mon", "Tue", "Wed", "Thu", "Fri", "Pro Skill", "Licensed", _
+                 "Int Skill", "Nov Skill", "MC", "MC Project", "Request", _
+                 "Job-Mon", "Job-Tue", "Job-Wed", "Job-Thu", "Job-Fri")
 
     Dim i As Long
     For i = 0 To UBound(hdrs)
@@ -104,11 +103,11 @@ Private Sub MockHeaderMap()
     ' Aliases
     p.Cells(base, 1).Value = "GoesBy":        p.Cells(base, 2).Value = 5
     p.Cells(base + 1, 1).Value = "Phone":     p.Cells(base + 1, 2).Value = 7
-    p.Cells(base + 2, 1).Value = "Thurs":     p.Cells(base + 2, 2).Value = 12
-    p.Cells(base + 3, 1).Value = "ProSkill":  p.Cells(base + 3, 2).Value = 14
-    p.Cells(base + 4, 1).Value = "IntSkill":  p.Cells(base + 4, 2).Value = 16
-    p.Cells(base + 5, 1).Value = "NovSkill":  p.Cells(base + 5, 2).Value = 17
-    p.Cells(base + 6, 1).Value = "MCP":       p.Cells(base + 6, 2).Value = 19
+    p.Cells(base + 2, 1).Value = "Thurs":     p.Cells(base + 2, 2).Value = 14
+    p.Cells(base + 3, 1).Value = "ProSkill":  p.Cells(base + 3, 2).Value = 16
+    p.Cells(base + 4, 1).Value = "IntSkill":  p.Cells(base + 4, 2).Value = 18
+    p.Cells(base + 5, 1).Value = "NovSkill":  p.Cells(base + 5, 2).Value = 19
+    p.Cells(base + 6, 1).Value = "MCP":       p.Cells(base + 6, 2).Value = 21
 End Sub
 
 Private Sub CleanMockHeaderMap()
@@ -153,9 +152,10 @@ Public Sub Test_GetMappedColumn_ReturnsCorrectIndex()
     MockHeaderMap
     AssertEqual "First=3", 3, ImportModule.GetMappedColumn("First")
     AssertEqual "Last=4", 4, ImportModule.GetMappedColumn("Last")
-    AssertEqual "Mon=9", 9, ImportModule.GetMappedColumn("Mon")
-    AssertEqual "Thu=12", 12, ImportModule.GetMappedColumn("Thu")
-    AssertEqual "MC Project=19", 19, ImportModule.GetMappedColumn("MC Project")
+    AssertEqual "Join Date=9", 9, ImportModule.GetMappedColumn(HDR_JOIN_DATE)
+    AssertEqual "Mon=11", 11, ImportModule.GetMappedColumn("Mon")
+    AssertEqual "Thu=14", 14, ImportModule.GetMappedColumn("Thu")
+    AssertEqual "MC Project=21", 21, ImportModule.GetMappedColumn("MC Project")
     CleanMockHeaderMap
 End Sub
 
@@ -163,7 +163,7 @@ Public Sub Test_GetMappedColumn_CaseInsensitive()
     MockHeaderMap
     AssertEqual "FIRST upper", 3, ImportModule.GetMappedColumn("FIRST")
     AssertEqual "first lower", 3, ImportModule.GetMappedColumn("first")
-    AssertEqual "mOn mixed", 9, ImportModule.GetMappedColumn("mOn")
+    AssertEqual "mOn mixed", 11, ImportModule.GetMappedColumn("mOn")
     CleanMockHeaderMap
 End Sub
 
@@ -171,12 +171,13 @@ Public Sub Test_GetMappedColumn_AliasResolution()
     MockHeaderMap
     AssertEqual "Goes By -> 5", 5, ImportModule.GetMappedColumn("Goes By")
     AssertEqual "GoesBy -> 5", 5, ImportModule.GetMappedColumn("GoesBy")
-    AssertEqual "Thu -> 12", 12, ImportModule.GetMappedColumn("Thu")
-    AssertEqual "Thurs -> 12", 12, ImportModule.GetMappedColumn("Thurs")
-    AssertEqual "Pro Skill -> 14", 14, ImportModule.GetMappedColumn("Pro Skill")
-    AssertEqual "ProSkill -> 14", 14, ImportModule.GetMappedColumn("ProSkill")
-    AssertEqual "MC Project -> 19", 19, ImportModule.GetMappedColumn("MC Project")
-    AssertEqual "MCP -> 19", 19, ImportModule.GetMappedColumn("MCP")
+    AssertEqual "Join Time -> 10", 10, ImportModule.GetMappedColumn(HDR_JOIN_TIME)
+    AssertEqual "Thu -> 14", 14, ImportModule.GetMappedColumn("Thu")
+    AssertEqual "Thurs -> 14", 14, ImportModule.GetMappedColumn("Thurs")
+    AssertEqual "Pro Skill -> 16", 16, ImportModule.GetMappedColumn("Pro Skill")
+    AssertEqual "ProSkill -> 16", 16, ImportModule.GetMappedColumn("ProSkill")
+    AssertEqual "MC Project -> 21", 21, ImportModule.GetMappedColumn("MC Project")
+    AssertEqual "MCP -> 21", 21, ImportModule.GetMappedColumn("MCP")
     CleanMockHeaderMap
 End Sub
 
@@ -248,42 +249,48 @@ Public Sub Test_CreateUniqueJobNumberList_DeduplicatesAcrossDays()
     Dim ws As Worksheet
     Set ws = MockParticipantSheet()
 
-    ' Write ALL 19 headers in their exact column positions so the mock sheet
-    ' looks identical to a real post-import FwParticipants sheet.
-    ws.Cells(1, 1).Value = "Minor or Adult"
-    ws.Cells(1, 2).Value = "Registration OrganizationId"
-    ws.Cells(1, 3).Value = "First"
-    ws.Cells(1, 4).Value = "Last"
-    ws.Cells(1, 5).Value = "Goes By"
-    ws.Cells(1, 6).Value = "Age"
-    ws.Cells(1, 7).Value = "CellPhone"
-    ws.Cells(1, 8).Value = "Email"
-    ws.Cells(1, 9).Value = "Mon"
-    ws.Cells(1, 10).Value = "Tue"
-    ws.Cells(1, 11).Value = "Wed"
-    ws.Cells(1, 12).Value = "Thu"
-    ws.Cells(1, 13).Value = "Fri"
-    ws.Cells(1, 14).Value = "Pro Skill"
-    ws.Cells(1, 15).Value = "Licensed"
-    ws.Cells(1, 16).Value = "Int Skill"
-    ws.Cells(1, 17).Value = "Nov Skill"
-    ws.Cells(1, 18).Value = "MC"
-    ws.Cells(1, 19).Value = "MC Project"
+    ' Row 3 = header row (matches FwParticipants); data from row 4 (JobNumbersModule).
+    ws.Cells(3, 1).Value = "Minor or Adult"
+    ws.Cells(3, 2).Value = "Registration OrganizationId"
+    ws.Cells(3, 3).Value = "First"
+    ws.Cells(3, 4).Value = "Last"
+    ws.Cells(3, 5).Value = "Goes By"
+    ws.Cells(3, 6).Value = "Age"
+    ws.Cells(3, 7).Value = "CellPhone"
+    ws.Cells(3, 8).Value = "Email"
+    ws.Cells(3, 9).Value = "Join Date"
+    ws.Cells(3, 10).Value = "Join Time"
+    ws.Cells(3, 11).Value = "Mon"
+    ws.Cells(3, 12).Value = "Tue"
+    ws.Cells(3, 13).Value = "Wed"
+    ws.Cells(3, 14).Value = "Thu"
+    ws.Cells(3, 15).Value = "Fri"
+    ws.Cells(3, 16).Value = "Pro Skill"
+    ws.Cells(3, 17).Value = "Licensed"
+    ws.Cells(3, 18).Value = "Int Skill"
+    ws.Cells(3, 19).Value = "Nov Skill"
+    ws.Cells(3, 20).Value = "MC"
+    ws.Cells(3, 21).Value = "MC Project"
+    ws.Cells(3, 22).Value = "Request"
+    ws.Cells(3, 23).Value = "Job-Mon"
+    ws.Cells(3, 24).Value = "Job-Tue"
+    ws.Cells(3, 25).Value = "Job-Wed"
+    ws.Cells(3, 26).Value = "Job-Thu"
+    ws.Cells(3, 27).Value = "Job-Fri"
 
-    ' Row 2: Mon=J-01, Fri=J-02
-    ' Column A must have a value so UsedRange and End(xlUp) both find the correct lastRow.
-    ws.Cells(2, 1).Value = "Adult"
-    ws.Cells(2, 3).Value = "Alice"
-    ws.Cells(2, 4).Value = "Smith"
-    ws.Cells(2, 9).Value = "J-01"
-    ws.Cells(2, 13).Value = "J-02"
+    ' Row 4: Job-Mon=J-01, Job-Fri=J-02
+    ws.Cells(4, 1).Value = "Adult"
+    ws.Cells(4, 3).Value = "Alice"
+    ws.Cells(4, 4).Value = "Smith"
+    ws.Cells(4, 23).Value = "J-01"
+    ws.Cells(4, 27).Value = "J-02"
 
-    ' Row 3: Mon=J-01 (duplicate across rows), Tue=J-03
-    ws.Cells(3, 1).Value = "Adult"
-    ws.Cells(3, 3).Value = "Bob"
-    ws.Cells(3, 4).Value = "Jones"
-    ws.Cells(3, 9).Value = "J-01"
-    ws.Cells(3, 10).Value = "J-03"
+    ' Row 5: Job-Mon=J-01 (duplicate), Job-Tue=J-03
+    ws.Cells(5, 1).Value = "Adult"
+    ws.Cells(5, 3).Value = "Bob"
+    ws.Cells(5, 4).Value = "Jones"
+    ws.Cells(5, 23).Value = "J-01"
+    ws.Cells(5, 24).Value = "J-03"
 
     Dim result As Collection
     Set result = CreateUniqueJobNumberList()

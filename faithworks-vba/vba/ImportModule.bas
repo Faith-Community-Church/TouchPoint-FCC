@@ -23,23 +23,25 @@ Option Explicit
 '   Col  6  Age
 '   Col  7  CellPhone      (alias: Phone)
 '   Col  8  Email          (alias: EmailAddress)
-'   Col  9  Mon
-'   Col 10  Tue
-'   Col 11  Wed
-'   Col 12  Thu            (alias: Thurs)
-'   Col 13  Fri
-'   Col 14  Pro Skill      (alias: ProSkill)
-'   Col 15  Licensed
-'   Col 16  Int Skill      (alias: IntSkill)
-'   Col 17  Nov Skill      (alias: NovSkill)
-'   Col 18  MC
-'   Col 19  MC Project     (alias: MCP)
-'   Col 20  Request
-'   Col 21  Job-Mon
-'   Col 22  Job-Tue
-'   Col 23  Job-Wed
-'   Col 24  Job-Thu
-'   Col 25  Job-Fri
+'   Col  9  Join Date
+'   Col 10  Join Time
+'   Col 11  Mon
+'   Col 12  Tue
+'   Col 13  Wed
+'   Col 14  Thu            (alias: Thurs)
+'   Col 15  Fri
+'   Col 16  Pro Skill      (alias: ProSkill)
+'   Col 17  Licensed
+'   Col 18  Int Skill      (alias: IntSkill)
+'   Col 19  Nov Skill      (alias: NovSkill)
+'   Col 20  MC
+'   Col 21  MC Project     (alias: MCP)
+'   Col 22  Request
+'   Col 23  Job-Mon
+'   Col 24  Job-Tue
+'   Col 25  Job-Wed
+'   Col 26  Job-Thu
+'   Col 27  Job-Fri
 '===============================================================================
 
 
