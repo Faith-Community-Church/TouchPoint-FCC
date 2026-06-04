@@ -2,6 +2,7 @@ Option Explicit
 
 '===============================================================================
 ' PrintJobModule.bas
+' Author: Steve Lashinski, 2026
 ' Given a job number, prints all participants assigned to that job.
 '
 ' Print layout:

@@ -2,6 +2,7 @@ Option Explicit
 
 '===============================================================================
 ' TestModule.bas
+' Author: Steve Lashinski, 2026
 ' Manual unit tests. Run any individual sub with F5, or run RunAllTests()
 ' to execute the full suite. No live TouchPoint export or Word needed.
 ' Tests write temporary data and always clean up after themselves.

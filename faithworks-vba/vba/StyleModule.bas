@@ -1,7 +1,8 @@
 Option Explicit
 
 ' =============================================================================
-' StyleModule -- FaithWorksPlanningMaster 2026
+' StyleModule.bas
+' Author: Steve Lashinski, 2026
 ' Applies all styling to FwParticipants after import.
 ' Called by ImportModule step 11.
 '

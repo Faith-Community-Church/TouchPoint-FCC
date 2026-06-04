@@ -2,6 +2,7 @@ Option Explicit
 
 '===============================================================================
 ' PrintButtonModule.bas
+' Author: Steve Lashinski, 2026
 ' Adds a Print button to the FwParticipants sheet header row and handles
 ' the click event that opens the JobListBox print-options form.
 '===============================================================================

@@ -2,6 +2,7 @@ Option Explicit
 
 '===============================================================================
 ' PrintParticipantsJobDayModule.bas
+' Author: Steve Lashinski, 2026
 ' For a selected weekday, prints ALL participants with a job assignment that day.
 ' Sorted by Last name. Three aligned columns: Last | First | Job number.
 '

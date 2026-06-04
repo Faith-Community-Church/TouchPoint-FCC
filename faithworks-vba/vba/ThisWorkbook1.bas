@@ -1,5 +1,6 @@
 '===============================================================================
-' ThisWorkbook.cls
+' ThisWorkbook.bas
+' Author: Steve Lashinski, 2026
 ' Double-click any cell in the Mon-Fri columns on FwParticipants to toggle
 ' a colour highlight. Double-click again to clear it.
 ' Column positions are resolved dynamically via GetMappedColumn so this works

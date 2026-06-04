@@ -2,7 +2,7 @@ Option Explicit
 
 '===============================================================================
 ' ImportModule.bas
-' Updated: May 2026
+' Author: Steve Lashinski, 2026
 '
 ' WHAT THIS MODULE DOES:
 '   1. Shows a browse dialog so the user picks the saved TouchPoint .xlsx export

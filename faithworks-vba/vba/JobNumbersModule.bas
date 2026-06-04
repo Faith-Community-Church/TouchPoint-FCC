@@ -2,6 +2,7 @@ Option Explicit
 
 '===============================================================================
 ' JobNumbersModule.bas
+' Author: Steve Lashinski, 2026
 ' Builds a sorted, deduplicated list of all job numbers found across the five
 ' Job-Mon through Job-Fri columns on the FwParticipants sheet.
 ' Used by JobListBox.UserForm_Initialize to populate the job-number combo box.

@@ -2,6 +2,7 @@ Option Explicit
 
 '===============================================================================
 ' Constants.bas
+' Author: Steve Lashinski, 2026
 ' Central home for all header names, named range keys, layout sizes, and
 ' colour values. If TouchPoint renames a column, update it here only.
 ' Non-developer note: a Const is like a named cell -- it gives a readable

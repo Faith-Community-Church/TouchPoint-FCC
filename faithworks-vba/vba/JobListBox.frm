@@ -1,3 +1,9 @@
+'===============================================================================
+' UserForm:  JobListBox
+' Author: Steve Lashinski, 2026
+' Print options: job number, job-by-day, participants-by-day, mail merge cards.
+'===============================================================================
+
 Option Explicit
 
 Private Sub DayOfWkLbl_Click()

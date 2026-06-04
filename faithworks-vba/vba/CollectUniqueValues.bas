@@ -2,6 +2,7 @@ Option Explicit
 
 '===============================================================================
 ' CollectUniqueValues.bas
+' Author: Steve Lashinski, 2026
 ' Returns a Collection containing one entry per unique non-empty string value
 ' found in the supplied range.  Uses a Variant array for speed â€” only one
 ' worksheet read regardless of range size.

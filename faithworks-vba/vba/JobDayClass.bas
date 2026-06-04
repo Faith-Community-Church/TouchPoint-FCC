@@ -1,7 +1,8 @@
 Option Explicit
 
 '===============================================================================
-' JobDayClass.cls
+' JobDayClass.bas
+' Author: Steve Lashinski, 2026
 ' Encapsulates day-specific column information for the print modules.
 ' Call Initialise("Mon") etc. before reading any properties.
 '

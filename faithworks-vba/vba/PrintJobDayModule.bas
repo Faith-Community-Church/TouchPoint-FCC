@@ -2,6 +2,7 @@ Option Explicit
 
 '===============================================================================
 ' PrintJobDayModule.bas
+' Author: Steve Lashinski, 2026
 ' For a selected weekday, prints one section per job number found that day.
 ' Each section: large job header, then Last / First in two aligned columns.
 '

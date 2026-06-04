@@ -1,5 +1,6 @@
 '===============================================================================
 ' ButtonActions.bas
+' Author: Steve Lashinski, 2026
 ' Purpose:   Public OnAction entry points for all shape buttons on
 '            FwParticipants. Must be Public Subs in a standard module —
 '            sheet modules and ThisWorkbook are not valid OnAction targets.

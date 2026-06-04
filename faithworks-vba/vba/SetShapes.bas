@@ -1,6 +1,10 @@
 Option Explicit
 
-' SetShapes -- creates the navy header band (rows 1-2) and two shape buttons.
+'===============================================================================
+' SetShapes.bas
+' Author: Steve Lashinski, 2026
+' Creates the navy header band (rows 1-2) and two shape buttons.
+'===============================================================================
 '
 ' Sheet layout contract:
 '   Rows 1-2 : Navy header band, RGB(31,56,100). NEVER cleared by other modules.

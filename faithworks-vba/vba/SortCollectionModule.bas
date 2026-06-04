@@ -2,6 +2,7 @@ Option Explicit
 
 '===============================================================================
 ' SortCollectionModule.bas
+' Author: Steve Lashinski, 2026
 ' Sorts a Collection of strings alphabetically ascending.
 ' Uses bubble sort â€” adequate for typical volunteer counts (~200 items).
 '

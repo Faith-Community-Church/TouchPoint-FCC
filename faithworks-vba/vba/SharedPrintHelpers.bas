@@ -2,6 +2,7 @@ Option Explicit
 
 '===============================================================================
 ' SharedPrintHelpers.bas
+' Author: Steve Lashinski, 2026
 ' Shared utility routines used by all print modules.
 ' Non-developer note: Think of this as a shared tool drawer â€” instead of each
 ' module carrying its own copy of the same tools, they all use these.

@@ -2,6 +2,7 @@ Option Explicit
 
 '===============================================================================
 ' MailMergePrintModule.bas
+' Author: Steve Lashinski, 2026
 ' Opens a Word mail merge template, connects it to the FwParticipants data,
 ' and runs the merge to produce volunteer cards.
 '

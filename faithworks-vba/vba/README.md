@@ -2,6 +2,8 @@
 
 VBA modules extracted from `FaithWorksPlanningMaster_2026.xlsm`.
 
+**Author:** Steve Lashinski, 2026. Each `.bas` and `.frm` file includes the same attribution in its header comment (`' Author: Steve Lashinski, 2026`).
+
 ## Module Overview
 
 | File | Purpose |
