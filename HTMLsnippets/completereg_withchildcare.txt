@@ -1,0 +1,11 @@
+<p style="text-align: center;"><img alt="" src="https://c4265878.ssl.cf2.rackcdn.com/fcchudson.2401090935.vecteezy_green-tick-checkbox-vector-illustration-isolated-on-white_6900704.jpg" style="width: 100px; height: 100px;" /></p>
+
+<p style="text-align: center;"><strong><span style="font-size:16px;"><em>Thank you for registering for {INSTER NAME}!</em></span></strong></p>
+
+<p style="text-align: center;"><span style="font-size:16px;"><em>You will be receiving a confirmation email shortly.</em></span></p>
+
+<hr />
+<p style="text-align: center;"><strong>We offer childcare for ages 0-5 for this event. Please use the link below to register your child(ren).</strong></p>
+
+<p style="text-align: center;"><span style="font-size:14px;"><strong>Click Here to Register for Childcare {INSERT URL}</strong></span></p>
+
