@@ -1,8 +1,8 @@
 #Roles=Access
 # Script: InvolvementDashboard.py
 # Purpose: Involvement demographics/finance dashboard with a Registration tab that
-#   summarizes new Registration Form (type 26) question responses, supports
-#   drill-down to options/people/full Q&A, and Excel (CSV) export.
+#   summarizes new Registration Form (type 26) question responses and supports
+#   drill-down to options/people/full Q&A.
 #   Find involvements via name search. Finance shows Amt>0 payment groups with
 #   paid-in-full vs remaining-balance counts. Overview demographics can vary by
 #   Program Id (see PROGRAM_OVERVIEW_PROFILES).
@@ -50,6 +50,45 @@ OVERVIEW_TEXT_TYPES = (QTYPE_TEXT,)
 PERSON_EXTRA_TYPES = (QTYPE_EMERGENCY, QTYPE_PARENTS)
 
 SUBTYPE_MENU = 1
+
+# Age brackets for Overview demographics (label -> inclusive min/max; None max = no upper bound)
+AGE_BRACKETS = [
+    ('0-5', 0, 5),
+    ('6-10', 6, 10),
+    ('11-13', 11, 13),
+    ('14-17', 14, 17),
+    ('18-24', 18, 24),
+    ('25-29', 25, 29),
+    ('30-39', 30, 39),
+    ('40-49', 40, 49),
+    ('50-64', 50, 64),
+    ('65+', 65, None),
+]
+AGE_BRACKET_LABELS = [b[0] for b in AGE_BRACKETS] + ['Unknown']
+
+
+def _age_bracket_label(age):
+    """Map a numeric age to a bracket label."""
+    if age is None:
+        return 'Unknown'
+    try:
+        age = int(age)
+    except:
+        return 'Unknown'
+    for label, lo, hi in AGE_BRACKETS:
+        if hi is None:
+            if age >= lo:
+                return label
+        elif lo <= age <= hi:
+            return label
+    return 'Unknown'
+
+
+def _empty_age_groups():
+    groups = {}
+    for label in AGE_BRACKET_LABELS:
+        groups[label] = 0
+    return groups
 
 # ---------------------------------------------------------------------------
 # Program-specific Overview profiles
@@ -185,7 +224,8 @@ def _s(val, default=''):
             return default
 
 
-def _i(val, default=0):s = _s(val)
+def _i(val, default=0):
+    s = _s(val)
     if not s:
         return default
     try:
@@ -290,7 +330,7 @@ def _json_dump_raw(obj):
     if obj is False:
         return 'false'
     try:
-        if isinstance(ob (int, long)) and not isinstance(obj, bool):
+        if isinstance(obj, (int, long)) and not isinstance(obj, bool):
             return str(int(obj))
     except:
         if isinstance(obj, int) and not isinstance(obj, bool):
@@ -554,7 +594,7 @@ def _build_registration_summary(org_id):
         return {'error': 'Organization not found'}
 
     reg_type = _i(org.RegistrationTypeId, 0)
-    if reg_type != REGISTRATION_FO_TYPE:
+    if reg_type != REGISTRATION_FORM_TYPE:
         return {
             'is_registration_form': False,
             'org_name': _s(org.OrganizationName),
@@ -836,45 +876,306 @@ def _get_person_answers(org_id, people_id):
     }
 
 
-def _export_registration_rows(org_id):
-    """One-sheet export: one row per person x question (completed only)."""
-    org = _org_meta(org_id)
-    if not org:
-        return {'error': 'Organization not found'}
-    if _i(org.RegistrationTypeId, 0) != REGISTRATION_FORM_TYPE:
-        return {'error': 'Not a Registration Form involvement'}
+def _get_age_people(org_id, bracket):
+    """People in an involvement whose age falls in the given bracket label."""
+    bracket = _s(bracket)
+    if bracket not in AGE_BRACKET_LABELS:
+        return {'error': 'Invalid age bracket'}
 
-    registrants = _completed_registrants(org_id)
-    questions = _questions_for_org(org_id)
-    show_types = OVERVIEW_CHOICE_TYPES + OVERVIEW_TEXT_TYPES + PERSON_EXTRA_TYPES
-    visible = [q for q in questions if _i(q.QuestionTypeId, 0) in show_types]
-    qids = [_s(q.RegQuestionId) for q in visible]
-    answers = _answers_for_registrants(org_id, qids)
+    sql = """
+SELECT
+    pe.PeopleId,
+    ISNULL(pe.Name2, LTRIM(RTRIM(ISNULL(pe.FirstName,'') + ' ' + ISNULL(pe.LastName,'')))) AS PersonName,
+    CASE
+        WHEN pe.BirthYear IS NOT NULL AND pe.BirthMonth IS NOT NULL AND pe.BirthDay IS NOT NULL
+        THEN DATEDIFF(year, DATEFROMPARTS(pe.BirthYear, pe.BirthMonth, pe.BirthDay), GETDATE())
+        ELSE NULL
+    END AS Age
+FROM OrganizationMembers om
+INNER JOIN People pe ON om.PeopleId = pe.PeopleId
+WHERE om.OrganizationId = @orgId
+  AND pe.IsDeceased = 0
+ORDER BY PersonName
+"""
+    p = _dd()
+    p.AddValue('orgId', org_id)
+    rows = list(q.QuerySql(sql, p))
+    people = []
+    for r in rows:
+        age = r.Age if hasattr(r, 'Age') and not _is_null(r.Age) else None
+        try:
+            age_i = int(age) if age is not None else None
+        except:
+            age_i = None
+        if _age_bracket_label(age_i) != bracket:
+            continue
+        people.append({
+            'people_id': _i(r.PeopleId),
+            'name': _s(r.PersonName, '(Unknown)'),
+            'age': age_i,
+        })
+    return {
+        'bracket': bracket,
+        'label': bracket,
+        'people': people,
+        'count': len(people),
+    }
 
-    ans_map = {}  # (regPeopleId, questionId) -> answer
-    for a in answers:
-        ans_map[(_s(a.RegPeopleId), _s(a.RegQuestionId))] = a
 
-    rows = []
-    for reg in registrants:
-        for qrow in visible:
-            qid = _s(qrow.RegQuestionId)
-            qt = _i(qrow.QuestionTypeId, 0)
-            st = _i(qrow.QuestionSubTypeId, 0) if not _is_null(qrow.QuestionSubTypeId) else 0
-            options = _parse_options(qrow.Options)
-            a = ans_map.get((_s(reg.RegPeopleId), qid))
-            parsed = _parse_answer(a.AnswerValue) if a else None
-            rows.append({
-                'people_id': _i(reg.PeopleId),
-                'name': _s(reg.PersonName),
-                'question': _s(qrow.Label),
-                'answer': '' if _is_blank_answer(parsed) else _answer_display(parsed, qt, st, options),
-            })
+def _member_grade_label(row):
+    """Same grade label logic as Overview grade distribution."""
+    label = _s(row.GradeLabel, 'Unknown') if hasattr(row, 'GradeLabel') else 'Unknown'
+    if not label or label.lower() == 'unknown':
+        return 'Unknown'
+    return label
+
+
+def _get_grade_people(org_id, grade):
+    """People in an involvement whose grade label matches (org grade, else person grade).
+    Includes gender so the Next Gen UI can filter grade + gender together.
+    """
+    grade = _s(grade, 'Unknown') or 'Unknown'
+
+    sql = """
+SELECT
+    pe.PeopleId,
+    pe.GenderId,
+    ISNULL(pe.Name2, LTRIM(RTRIM(ISNULL(pe.FirstName,'') + ' ' + ISNULL(pe.LastName,'')))) AS PersonName,
+    COALESCE(
+        NULLIF(LTRIM(RTRIM(gl_om.Description)), ''),
+        NULLIF(LTRIM(RTRIM(gl_pe.Description)), ''),
+        'Unknown'
+    ) AS GradeLabel
+FROM OrganizationMembers om
+INNER JOIN People pe ON om.PeopleId = pe.PeopleId
+LEFT JOIN lookup.GradeLevel gl_pe ON pe.GradeLevelId = gl_pe.Id
+LEFT JOIN lookup.GradeLevel gl_om ON om.GradeLevelId = gl_om.Id
+WHERE om.OrganizationId = @orgId
+  AND pe.IsDeceased = 0
+ORDER BY PersonName
+"""
+    p = _dd()
+    p.AddValue('orgId', org_id)
+    rows = list(q.QuerySql(sql, p))
+    people = []
+    male_count = 0
+    female_count = 0
+    for r in rows:
+        label = _member_grade_label(r)
+        if label != grade:
+            continue
+        gid = _i(r.GenderId, 0) if hasattr(r, 'GenderId') and not _is_null(r.GenderId) else 0
+        if gid == 1:
+            gender = 'male'
+            male_count += 1
+        elif gid == 2:
+            gender = 'female'
+            female_count += 1
+        else:
+            gender = 'unknown'
+        people.append({
+            'people_id': _i(r.PeopleId),
+            'name': _s(r.PersonName, '(Unknown)'),
+            'grade': label,
+            'gender': gender,
+        })
+    return {
+        'grade': grade,
+        'label': grade,
+        'people': people,
+        'count': len(people),
+        'male_count': male_count,
+        'female_count': female_count,
+    }
+
+
+def _get_gender_people(org_id, gender):
+    """People in an involvement by gender: male (1) or female (2)."""
+    gender = _s(gender).lower()
+    if gender == 'male':
+        gender_id = 1
+        label = 'Male'
+    elif gender == 'female':
+        gender_id = 2
+        label = 'Female'
+    else:
+        return {'error': 'Invalid gender'}
+
+    sql = """
+SELECT
+    pe.PeopleId,
+    ISNULL(pe.Name2, LTRIM(RTRIM(ISNULL(pe.FirstName,'') + ' ' + ISNULL(pe.LastName,'')))) AS PersonName
+FROM OrganizationMembers om
+INNER JOIN People pe ON om.PeopleId = pe.PeopleId
+WHERE om.OrganizationId = @orgId
+  AND pe.IsDeceased = 0
+  AND pe.GenderId = @genderId
+ORDER BY PersonName
+"""
+    p = _dd()
+    p.AddValue('orgId', org_id)
+    p.AddValue('genderId', gender_id)
+    rows = list(q.QuerySql(sql, p))
+    people = [{
+        'people_id': _i(r.PeopleId),
+        'name': _s(r.PersonName, '(Unknown)'),
+    } for r in rows]
+    return {
+        'gender': gender,
+        'label': label,
+        'people': people,
+        'count': len(people),
+    }
+
+
+def _get_marital_people(org_id, status):
+    """People in an involvement with the given marital status label."""
+    status = _s(status, 'Unknown')
+    if not status:
+        status = 'Unknown'
+
+    sql = """
+SELECT
+    pe.PeopleId,
+    ISNULL(pe.Name2, LTRIM(RTRIM(ISNULL(pe.FirstName,'') + ' ' + ISNULL(pe.LastName,'')))) AS PersonName,
+    ISNULL(NULLIF(LTRIM(RTRIM(ms.Description)), ''), 'Unknown') AS MaritalStatus
+FROM OrganizationMembers om
+INNER JOIN People pe ON om.PeopleId = pe.PeopleId
+LEFT JOIN lookup.MaritalStatus ms ON pe.MaritalStatusId = ms.Id
+WHERE om.OrganizationId = @orgId
+  AND pe.IsDeceased = 0
+ORDER BY PersonName
+"""
+    p = _dd()
+    p.AddValue('orgId', org_id)
+    rows = list(q.QuerySql(sql, p))
+    people = []
+    for r in rows:
+        row_status = _s(r.MaritalStatus, 'Unknown') if hasattr(r, 'MaritalStatus') else 'Unknown'
+        if not row_status:
+            row_status = 'Unknown'
+        if row_status != status:
+            continue
+        people.append({
+            'people_id': _i(r.PeopleId),
+            'name': _s(r.PersonName, '(Unknown)'),
+            'marital_status': row_status,
+        })
+    return {
+        'status': status,
+        'label': status,
+        'people': people,
+        'count': len(people),
+    }
+
+
+def _get_subgroup_people(org_id, subgroup_id):
+    """People tagged into a specific involvement subgroup (MemberTag)."""
+    subgroup_id = _i(subgroup_id, 0)
+    if subgroup_id <= 0:
+        return {'error': 'Invalid subgroup'}
+
+    name_sql = """
+SELECT TOP 1 mt.Name AS SubgroupName
+FROM MemberTags mt
+WHERE mt.Id = @tagId
+  AND mt.OrgId = @orgId
+"""
+    p0 = _dd()
+    p0.AddValue('tagId', subgroup_id)
+    p0.AddValue('orgId', org_id)
+    name_rows = list(q.QuerySql(name_sql, p0))
+    if not name_rows:
+        return {'error': 'Subgroup not found'}
+    subgroup_name = _s(name_rows[0].SubgroupName, 'Subgroup')
+
+    sql = """
+SELECT
+    pe.PeopleId,
+    ISNULL(pe.Name2, LTRIM(RTRIM(ISNULL(pe.FirstName,'') + ' ' + ISNULL(pe.LastName,'')))) AS PersonName
+FROM OrgMemMemTags omt
+INNER JOIN People pe ON omt.PeopleId = pe.PeopleId
+WHERE omt.OrgId = @orgId
+  AND omt.MemberTagId = @tagId
+  AND pe.IsDeceased = 0
+ORDER BY PersonName
+"""
+    p = _dd()
+    p.AddValue('orgId', org_id)
+    p.AddValue('tagId', subgroup_id)
+    rows = list(q.QuerySql(sql, p))
+    people = []
+    for r in rows:
+        people.append({
+            'people_id': _i(r.PeopleId),
+            'name': _s(r.PersonName, '(Unknown)'),
+        })
+    return {
+        'subgroup_id': subgroup_id,
+        'label': subgroup_name,
+        'people': people,
+        'count': len(people),
+    }
+
+
+def _parse_people_ids(raw):
+    """Parse a comma-separated PeopleId list into unique positive ints."""
+    ids = []
+    seen = {}
+    for part in _s(raw).replace(';', ',').split(','):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            pid = int(part)
+        except:
+            continue
+        if pid > 0 and pid not in seen:
+            seen[pid] = True
+            ids.append(pid)
+    return ids
+
+
+def _add_people_to_tag(people_ids_raw, tag_name, clear_first):
+    """
+    Add people to a personal tag owned by the current user.
+    clear_first: empty the tag before adding (vs append).
+    """
+    owner_id = model.UserPeopleId
+    if not owner_id:
+        return {'error': 'You must be signed in to add people to a tag.'}
+
+    tag_name = _s(tag_name).replace('!', '_').strip()
+    if not tag_name:
+        return {'error': 'Tag name is required.'}
+    if len(tag_name) > 50:
+        return {'error': 'Tag name is too long (max 50 characters).'}
+
+    people_ids = _parse_people_ids(people_ids_raw)
+    if not people_ids:
+        return {'error': 'No people to add to the tag.'}
+
+    clear = False
+    clear_s = _s(clear_first).lower()
+    if clear_s in ('1', 'true', 'yes', 'clear'):
+        clear = True
+
+    # peopleids='1,2,3' is accepted by PeopleQuery2 / AddTag
+    query = "peopleids='" + ','.join([str(pid) for pid in people_ids]) + "'"
+    model.AddTag(query, tag_name, int(owner_id), clear)
+
+    try:
+        import urllib
+        tag_q = urllib.quote(tag_name.encode('utf-8'))
+    except:
+        tag_q = tag_name.replace(' ', '%20')
 
     return {
-        'org_name': _s(org.OrganizationName),
-        'filename': 'registration-answers-' + str(org_id) + '.csv',
-        'rows': rows,
+        'ok': True,
+        'tag_name': tag_name,
+        'count': len(people_ids),
+        'cleared': clear,
+        'tag_url': '/Tags?tag=' + tag_q,
     }
 
 
@@ -888,7 +1189,7 @@ def _get_finance_people(org_id, status):
     - Prefers TransactionPeople; LoginPeopleId only when a group has no TP rows.
     - No role checks here — speed is SQL shape / data volume, not roles.
     """
-    status _s(status)
+    status = _s(status)
     if status not in ('paid_in_full', 'remaining_balance'):
         return {'error': 'Invalid finance status'}
 
@@ -1109,26 +1410,16 @@ ORDER BY
                 male_count = len([m for m in members if m.GenderId == 1])
                 female_count = len([m for m in members if m.GenderId == 2])
 
-                age_groups = {'0-12': 0, '13-17': 0, '18-25': 0, '26-35': 0, '36-50': 0, '51-65': 0, '66+': 0, 'Unknown': 0}
+                age_groups = _empty_age_groups()
                 if profile.get('show_age'):
                     for member in members:
-                        age = member.Age if hasattr(member, 'Age') and member.Age else None
-                        if age is None:
-                            age_groups['Unknown'] += 1
-                        elif age <= 12:
-                            age_groups['0-12'] += 1
-                        elif age <= 17:
-                            age_groups['13-17'] += 1
-                        elif age <= 25:
-                            age_groups['18-25'] += 1
-                        elif age <= 35:
-                            age_groups['26-35'] += 1
-                        elif age <= 50:
-                            age_groups['36-50'] += 1
-                        elif age <= 65:
-                            age_groups['51-65'] += 1
-                        else:
-                            age_groups['66+'] += 1
+                        age = member.Age if hasattr(member, 'Age') and not _is_null(member.Age) else None
+                        try:
+                            age_i = int(age) if age is not None else None
+                        except:
+                            age_i = None
+                        label = _age_bracket_label(age_i)
+                        age_groups[label] = age_groups.get(label, 0) + 1
 
                 grades = []
                 if profile.get('show_grade'):
@@ -1153,8 +1444,9 @@ ORDER BY
                 marital_status = {}
                 if profile.get('show_marital'):
                     for member in members:
-                        status = member.MaritalStatus if hasattr(member, 'MaritalStatus') and member.MaritalStatus else 'Unknown'
-                        marital_status[_s(status, 'Unknown')] = marital_status.get(_s(status, 'Unknown'), 0) + 1
+                        raw = member.MaritalStatus if hasattr(member, 'MaritalStatus') and not _is_null(member.MaritalStatus) else None
+                        status = _s(raw, 'Unknown') or 'Unknown'
+                        marital_status[status] = marital_status.get(status, 0) + 1
 
                 enrollment_timeline = {}
                 if profile.get('show_enrollment_timeline'):
@@ -1167,9 +1459,10 @@ ORDER BY
                 sorted_timeline.reverse()
 
                 subgroup_sql = """
-                    SELECT mt.Name as SubgroupName, COUNT(DISTINCT omt.PeopleId) as MemberCount
+                    SELECT mt.Id as SubgroupId, mt.Name as SubgroupName, COUNT(DISTINCT omt.PeopleId) as MemberCount
                     FROM MemberTags mt
-                    LEFT JOIN OrgMemMemTags omt ON mt.Id = omt.MemberTagId AND omt.OrgId = @orgId
+                    INNER JOIN OrgMemMemTags omt ON mt.Id = omt.MemberTagId AND omt.OrgId = @orgId
+                    WHERE mt.OrgId = @orgId
                     GROUP BY mt.Id, mt.Name
                     HAVING COUNT(DISTINCT omt.PeopleId) > 0
                     ORDER BY mt.Name
@@ -1241,7 +1534,7 @@ INNER JOIN Latest l ON l.GroupId = g.GroupId AND l.rn = 1
                     'grades': grades,
                     'marital_status': marital_status if profile.get('show_marital') else {},
                     'enrollment_timeline': dict(sorted_timeline) if profile.get('show_enrollment_timeline') else {},
-                    'subgroups': [{'name': s.SubgroupName, 'count': s.MemberCount} for s in subgroups],
+                    'subgroups': [{'id': _i(s.SubgroupId), 'name': _s(s.SubgroupName), 'count': _i(s.MemberCount)} for s in subgroups],
                     'transactions': {
                         'total': int(transactions.TotalTransactions) if transactions and transactions.TotalTransactions else 0,
                         'paid_in_full': int(transactions.PaidInFullCount) if transactions and transactions.PaidInFullCount else 0,
@@ -1286,6 +1579,46 @@ INNER JOIN Latest l ON l.GroupId = g.GroupId AND l.rn = 1
         except Exception, e:
             _err_out(e)
 
+    elif action == 'get_age_people':
+        try:
+            org_id = _i(_data('org_id'), 0)
+            bracket = _s(_data('bracket'))
+            _json_out(_get_age_people(org_id, bracket))
+        except Exception, e:
+            _err_out(e)
+
+    elif action == 'get_grade_people':
+        try:
+            org_id = _i(_data('org_id'), 0)
+            grade = _s(_data('grade'))
+            _json_out(_get_grade_people(org_id, grade))
+        except Exception, e:
+            _err_out(e)
+
+    elif action == 'get_gender_people':
+        try:
+            org_id = _i(_data('org_id'), 0)
+            gender = _s(_data('gender'))
+            _json_out(_get_gender_people(org_id, gender))
+        except Exception, e:
+            _err_out(e)
+
+    elif action == 'get_marital_people':
+        try:
+            org_id = _i(_data('org_id'), 0)
+            status = _s(_data('status'))
+            _json_out(_get_marital_people(org_id, status))
+        except Exception, e:
+            _err_out(e)
+
+    elif action == 'get_subgroup_people':
+        try:
+            org_id = _i(_data('org_id'), 0)
+            subgroup_id = _i(_data('subgroup_id'), 0)
+            _json_out(_get_subgroup_people(org_id, subgroup_id))
+        except Exception, e:
+            _err_out(e)
+
     elif action == 'get_finance_people':
         try:
             org_id = _i(_data('org_id'), 0)
@@ -1294,10 +1627,12 @@ INNER JOIN Latest l ON l.GroupId = g.GroupId AND l.rn = 1
         except Exception, e:
             _err_out(e)
 
-    elif action == 'export_registration':
+    elif action == 'add_to_tag':
         try:
-            org_id = _i(_data('org_id'), 0)
-            _json_out(_export_registration_rows(org_id))
+            people_ids = _s(_data('people_ids'))
+            tag_name = _s(_data('tag_name'))
+            clear_first = _s(_data('clear_first'))
+            _json_out(_add_people_to_tag(people_ids, tag_name, clear_first))
         except Exception, e:
             _err_out(e)
 
@@ -1325,6 +1660,13 @@ else:
         margin: 0 0 20px 0;
         color: #1e293b;
         font-size: 24px;
+    }
+    .selector-card h2.selector-toggleable {
+        cursor: pointer;
+        user-select: none;
+    }
+    .selector-card h2.selector-toggleable:hover {
+        color: #012b58;
     }
     .selector-card select {
         width: 100%;
@@ -1484,6 +1826,13 @@ else:
         margin: 0 0 10px 0;
         font-size: 32px;
     }
+    .dashboard-header h1 a {
+        color: inherit;
+        text-decoration: none;
+    }
+    .dashboard-header h1 a:hover {
+        text-decoration: underline;
+    }
     .stats-grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -1496,6 +1845,27 @@ else:
         border-radius: 12px;
         box-shadow: 0 2px 8px rgba(0,0,0,0.1);
         text-align: center;
+    }
+    .stat-card-clickable {
+        cursor: pointer;
+        border: 2px solid transparent;
+        transition: box-shadow 0.15s ease, transform 0.15s ease, border-color 0.15s ease;
+    }
+    .stat-card-clickable:hover {
+        box-shadow: 0 4px 14px rgba(1, 43, 88, 0.15);
+        transform: translateY(-1px);
+        border-color: #019cff;
+    }
+    .stat-card-clickable.active {
+        border-color: #012b58;
+        background: #eef6ff;
+    }
+    .stat-card-clickable .stat-drill-hint {
+        font-size: 11px;
+        color: #64748b;
+        margin-top: 4px;
+        text-transform: none;
+        letter-spacing: 0;
     }
     .stat-value {
         font-size: 36px;
@@ -1645,14 +2015,6 @@ else:
     #tab-registration .people-table a {
         color: #005c3b;
     }
-    #tab-registration .btn-export {
-        background: #ff7941;
-        color: #fff;
-    }
-    #tab-registration .btn-export:hover {
-        background: #e56a35;
-        color: #fff;
-    }
     #tab-registration .btn-back {
         background: #fffef8;
         color: #005c3b;
@@ -1724,6 +2086,93 @@ else:
         color: #005c3b;
         text-decoration: underline;
     }
+    .age-bar-clickable {
+        cursor: pointer;
+        border-radius: 6px;
+        padding: 4px 0;
+        margin-bottom: 11px;
+    }
+    .age-bar-clickable:hover {
+        background: #f1f5f9;
+    }
+    .age-bar-clickable:hover .chart-label {
+        color: #012b58;
+        text-decoration: underline;
+    }
+    .age-bar-clickable.active {
+        background: #eef6ff;
+    }
+    .grade-bar-clickable {
+        cursor: pointer;
+        border-radius: 6px;
+        padding: 4px 0;
+        margin-bottom: 11px;
+    }
+    .grade-bar-clickable:hover {
+        background: #f1f5f9;
+    }
+    .grade-bar-clickable:hover .chart-label {
+        color: #012b58;
+        text-decoration: underline;
+    }
+    .grade-bar-clickable.active {
+        background: #eef6ff;
+    }
+    .grade-gender-filters {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 0 0 14px 0;
+    }
+    .grade-gender-filter {
+        border: 2px solid #e2e8f0;
+        background: #fff;
+        color: #334155;
+        border-radius: 999px;
+        padding: 6px 14px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+    }
+    .grade-gender-filter:hover {
+        border-color: #019cff;
+        color: #012b58;
+    }
+    .grade-gender-filter.active {
+        background: #012b58;
+        border-color: #012b58;
+        color: #fff;
+    }
+    .marital-bar-clickable {
+        cursor: pointer;
+        border-radius: 6px;
+        padding: 4px 0;
+        margin-bottom: 11px;
+    }
+    .marital-bar-clickable:hover {
+        background: #f1f5f9;
+    }
+    .marital-bar-clickable:hover .chart-label {
+        color: #012b58;
+        text-decoration: underline;
+    }
+    .marital-bar-clickable.active {
+        background: #eef6ff;
+    }
+    .subgroup-item-clickable {
+        cursor: pointer;
+    }
+    .subgroup-item-clickable:hover {
+        background: #eef6ff;
+    }
+    .subgroup-item-clickable:hover .subgroup-name {
+        color: #012b58;
+        text-decoration: underline;
+    }
+    .subgroup-item-clickable.active {
+        background: #eef6ff;
+        border-left-color: #012b58;
+    }
     .people-table {
         width: 100%;
         border-collapse: collapse;
@@ -1746,16 +2195,6 @@ else:
         text-decoration: none;
     }
     .people-table a:hover { text-decoration: underline; }
-    .btn-export {
-        background: #ff7941;
-        color: #fff;
-        border: none;
-        border-radius: 8px;
-        padding: 10px 16px;
-        font-weight: 600;
-        cursor: pointer;
-    }
-    .btn-export:hover { background: #e56a35; color: #fff; }
     .finance-stat-clickable {
         cursor: pointer;
         transition: box-shadow 0.15s ease, transform 0.15s ease;
@@ -1785,6 +2224,111 @@ else:
         gap: 12px;
         flex-wrap: wrap;
     }
+    .drill-actions {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+    }
+    .btn-tag-add {
+        background: #012b58;
+        color: #fff;
+        border: none;
+        border-radius: 8px;
+        padding: 8px 14px;
+        font-weight: 600;
+        cursor: pointer;
+    }
+    .btn-tag-add:hover { background: #019cff; color: #fff; }
+    .btn-tag-add:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+    }
+    .tag-modal-overlay {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 10050;
+        background: rgba(15, 23, 42, 0.45);
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+    }
+    .tag-modal-overlay.visible { display: flex; }
+    .tag-modal {
+        background: #fff;
+        border-radius: 14px;
+        width: 100%;
+        max-width: 440px;
+        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25);
+        overflow: hidden;
+    }
+    .tag-modal-header {
+        padding: 16px 20px;
+        background: #012b58;
+        color: #fff;
+        font-size: 18px;
+        font-weight: 600;
+    }
+    .tag-modal-body { padding: 20px; }
+    .tag-modal-body label {
+        display: block;
+        font-weight: 600;
+        color: #334155;
+        margin-bottom: 6px;
+        font-size: 13px;
+    }
+    .tag-modal-body input[type="text"] {
+        width: 100%;
+        padding: 10px 12px;
+        border: 2px solid #e2e8f0;
+        border-radius: 8px;
+        font-size: 15px;
+        box-sizing: border-box;
+        margin-bottom: 16px;
+    }
+    .tag-modal-body input[type="text"]:focus {
+        outline: none;
+        border-color: #019cff;
+    }
+    .tag-modal-meta {
+        font-size: 13px;
+        color: #64748b;
+        margin: 0 0 14px 0;
+    }
+    .tag-modal-options {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        margin-bottom: 8px;
+    }
+    .tag-modal-options label.option-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        font-weight: 500;
+        cursor: pointer;
+        margin: 0;
+    }
+    .tag-modal-options input {
+        margin-top: 3px;
+    }
+    .tag-modal-footer {
+        padding: 14px 20px 20px;
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+    }
+    .btn-tag-confirm {
+        background: #012b58;
+        color: #fff;
+        border: none;
+        border-radius: 8px;
+        padding: 10px 16px;
+        font-weight: 600;
+        cursor: pointer;
+    }
+    .btn-tag-confirm:hover { background: #019cff; }
     .btn-back {
         background: #f1f5f9;
         color: #334155;
@@ -1813,7 +2357,7 @@ else:
         display: none;
         position: fixed;
         inset: 0;
-        z-index: 9999;
+        z-index: 10100;
         background: rgba(15, 23, 42, 0.35);
         align-items: center;
         justify-content: center;
@@ -1875,8 +2419,37 @@ else:
         <div class="loading-card">
             <div class="loading-spinner"></div>
             <p class="loading-text" id="loading-text">Loading...</p>
-            <p class="loading-subtext">This may take a minute to go to space and back. 🚀<>
+            <p class="loading-subtext">This may take a minute to go to space and back. 🚀</p>
             <button type="button" class="btn-cancel-loading" id="btn-cancel-loading">Cancel</button>
+        </div>
+    </div>
+
+    <div class="tag-modal-overlay" id="tag-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="tag-modal-title">
+        <div class="tag-modal">
+            <div class="tag-modal-header" id="tag-modal-title">Add to Tag</div>
+            <div class="tag-modal-body">
+                <p class="tag-modal-meta" id="tag-modal-count"></p>
+                <label for="tag-name-input">Tag name</label>
+                <input type="text" id="tag-name-input" maxlength="50" placeholder="e.g. FW Volunteers 18-24" autocomplete="off" />
+                <div class="tag-modal-options">
+                    <label class="option-row">
+                        <input type="radio" name="tag-mode" value="append" checked />
+                        <span>Append — add these people; keep anyone already on the tag</span>
+                    </label>
+                    <label class="option-row">
+                        <input type="radio" name="tag-mode" value="clear" />
+                        <span>Clear first — empty the tag, then add only this list</span>
+                    </label>
+                    <label class="option-row">
+                        <input type="checkbox" id="tag-open-when-done" checked />
+                        <span>Open the tag in a new tab when done</span>
+                    </label>
+                </div>
+            </div>
+            <div class="tag-modal-footer">
+                <button type="button" class="btn-back" id="btn-tag-cancel">Cancel</button>
+                <button type="button" class="btn-tag-confirm" id="btn-tag-confirm">Add to Tag</button>
+            </div>
         </div>
     </div>
 
@@ -1919,17 +2492,24 @@ else:
 
         <div class="tab-panel active" id="tab-overview">
             <div class="stats-grid" id="stats-grid"></div>
+            <div id="gender-drilldown" style="display:none; margin: 0 0 30px 0;"></div>
             <div class="section" id="age-section" style="display:none;">
                 <h2 class="section-title" id="distribution-title"><i class="fa fa-chart-bar"></i> Age Distribution</h2>
+                <p class="finance-drill-hint" style="margin-top:-8px;margin-bottom:12px;">Click an age group to view people</p>
                 <div id="age-chart"></div>
+                <div id="age-drilldown" style="display:none; margin-top: 18px;"></div>
             </div>
             <div class="section" id="grade-section" style="display:none;">
                 <h2 class="section-title"><i class="fa fa-graduation-cap"></i> Grade Distribution</h2>
+                <p class="finance-drill-hint" style="margin-top:-8px;margin-bottom:12px;">Click a grade, then filter All / Male / Female</p>
                 <div id="grade-chart"></div>
+                <div id="grade-drilldown" style="display:none; margin-top: 18px;"></div>
             </div>
             <div class="section" id="marital-section" style="display:none;">
                 <h2 class="section-title"><i class="fa fa-heart"></i> Marital Status</h2>
+                <p class="finance-drill-hint" style="margin-top:-8px;margin-bottom:12px;">Click a status to view people</p>
                 <div id="marital-chart"></div>
+                <div id="marital-drilldown" style="display:none; margin-top: 18px;"></div>
             </div>
             <div class="section" id="timeline-section" style="display:none;">
                 <h2 class="section-title"><i class="fa fa-calendar-plus"></i> Enrollment Timeline (Last 12 Months)</h2>
@@ -1942,7 +2522,9 @@ else:
             </div>
             <div class="section" id="subgroup-section" style="display:none;">
                 <h2 class="section-title"><i class="fa fa-layer-group"></i> Subgroups</h2>
+                <p class="finance-drill-hint" style="margin-top:-8px;margin-bottom:12px;">Click a subgroup to view people</p>
                 <div id="subgroup-list"></div>
+                <div id="subgroup-drilldown" style="display:none; margin-top: 18px;"></div>
             </div>
         </div>
 
@@ -1950,11 +2532,6 @@ else:
             <div class="section">
                 <div class="reg-toolbar">
                     <h2 class="section-title" style="margin:0;"><i class="fa fa-clipboard-list"></i> Registration Questions</h2>
-                    <div>
-                        <button type="button" class="btn-export" id="btn-export-reg" style="display:none;">
-                            <i class="fa fa-download"></i> Export Excel
-                        </button>
-                    </div>
                 </div>
                 <div class="reg-breadcrumb" id="reg-breadcrumb"></div>
                 <div id="reg-view"></div>
@@ -1969,6 +2546,7 @@ else:
         var scriptUrl = window.location.pathname;
         var currentOrgId = null;
         var regState = { view: 'summary', question: null, option: null, person: null, summary: null };
+        var gradeDrillState = { label: '', people: [], filter: 'all' };
         var currentXhr = null;
         var loadGeneration = 0;
 
@@ -1983,6 +2561,128 @@ else:
         function personLink(peopleId, name) {
             return '<a href="/Person2/' + encodeURIComponent(peopleId) + '" target="_blank" rel="noopener">' + esc(name) + '</a>';
         }
+
+        var pendingTagPeopleIds = [];
+
+        function collectPeopleIds(people) {
+            var ids = [];
+            var seen = {};
+            (people || []).forEach(function(p) {
+                var id = p && p.people_id ? parseInt(p.people_id, 10) : 0;
+                if (id > 0 && !seen[id]) {
+                    seen[id] = true;
+                    ids.push(id);
+                }
+            });
+            return ids;
+        }
+
+        function drillActionsHtml(options) {
+            options = options || {};
+            var ids = options.peopleIds || [];
+            var html = '<div class="drill-actions">';
+            if (ids.length) {
+                html += '<button type="button" class="btn-tag-add" data-people-ids="' + esc(ids.join(',')) + '">';
+                html += '<i class="fa fa-tag"></i> Add to Tag</button>';
+            }
+            if (options.closeBtnId) {
+                html += '<button type="button" class="btn-back" id="' + esc(options.closeBtnId) + '">' +
+                    esc(options.closeLabel || 'Close') + '</button>';
+            }
+            if (options.backNav) {
+                html += '<button type="button" class="btn-back" data-nav="' + esc(options.backNav) + '">';
+                html += '<i class="fa fa-arrow-left"></i> ' + esc(options.backLabel || 'Back') + '</button>';
+            }
+            html += '</div>';
+            return html;
+        }
+
+        function openTagModal(peopleIds, suggestedName) {
+            pendingTagPeopleIds = peopleIds || [];
+            if (!pendingTagPeopleIds.length) {
+                alert('No people in this list to tag.');
+                return;
+            }
+            $('#tag-modal-count').text(pendingTagPeopleIds.length + ' people will be added to this tag.');
+            $('#tag-name-input').val(suggestedName || '');
+            $('input[name="tag-mode"][value="append"]').prop('checked', true);
+            $('#tag-open-when-done').prop('checked', true);
+            $('#tag-modal-overlay').addClass('visible');
+            setTimeout(function() { $('#tag-name-input').focus().select(); }, 50);
+        }
+
+        function closeTagModal() {
+            $('#tag-modal-overlay').removeClass('visible');
+            pendingTagPeopleIds = [];
+        }
+
+        function submitAddToTag() {
+            var tagName = $.trim($('#tag-name-input').val() || '');
+            if (!tagName) {
+                alert('Enter a tag name.');
+                $('#tag-name-input').focus();
+                return;
+            }
+            if (!pendingTagPeopleIds.length) {
+                alert('No people to tag.');
+                return;
+            }
+            var clearFirst = $('input[name="tag-mode"]:checked').val() === 'clear';
+            var openWhenDone = $('#tag-open-when-done').is(':checked');
+            var idsCsv = pendingTagPeopleIds.join(',');
+            $('#tag-modal-overlay').removeClass('visible');
+            showLoading('Adding people to tag...', false);
+            ajaxPost({
+                action: 'add_to_tag',
+                people_ids: idsCsv,
+                tag_name: tagName,
+                clear_first: clearFirst ? '1' : '0'
+            }, function(data) {
+                pendingTagPeopleIds = [];
+                if (data.error) {
+                    alert(data.error);
+                    $('#tag-modal-overlay').addClass('visible');
+                    return;
+                }
+                var msg = (data.count || 0) + ' people added to tag "' + (data.tag_name || tagName) + '"';
+                if (data.cleared) msg += ' (tag cleared first)';
+                if (openWhenDone && data.tag_url) {
+                    window.open(data.tag_url, '_blank', 'noopener');
+                } else {
+                    alert(msg + '.');
+                }
+            }, { showLoading: true });
+        }
+
+        $(document).on('click', '.btn-tag-add', function() {
+            var ids = String($(this).attr('data-people-ids') || '')
+                .split(',')
+                .map(function(x) { return parseInt(x, 10); })
+                .filter(function(x) { return x > 0; });
+            var suggested = String($(this).attr('data-tag-suggest') || '');
+            openTagModal(ids, suggested);
+        });
+
+        $(document).on('click', '#btn-tag-cancel', function() {
+            closeTagModal();
+        });
+
+        $(document).on('click', '#btn-tag-confirm', function() {
+            submitAddToTag();
+        });
+
+        $(document).on('keydown', '#tag-name-input', function(e) {
+            if (e.which === 13) {
+                e.preventDefault();
+                submitAddToTag();
+            } else if (e.which === 27) {
+                closeTagModal();
+            }
+        });
+
+        $(document).on('click', '#tag-modal-overlay', function(e) {
+            if (e.target === this) closeTagModal();
+        });
 
         function showLoading(message, isReg) {
             $('#loading-text').text(message || 'Loading...');
@@ -2048,7 +2748,7 @@ else:
             return currentXhr;
         }
 
-        $(document).on('click', '#toggle-selector', function() {
+        $(document).on('click', '#selector-card h2.selector-toggleable', function() {
             $('#selector-content').slideToggle();
         });
 
@@ -2096,7 +2796,7 @@ else:
             if (term.length < 2) {
                 hideSearchResults();
                 if (immediate) {
-                   $('#search-results').html('<div class="search-empty">Enter at least 2 characters to search.</div>').addClass('visible');
+                    $('#search-results').html('<div class="search-empty">Enter at least 2 characters to search.</div>').addClass('visible');
                 }
                 return;
             }
@@ -2155,6 +2855,299 @@ else:
             }
         });
 
+        $(document).on('click', '.age-bar-clickable', function() {
+            var bracket = String($(this).attr('data-age-bracket') || '');
+            if (!currentOrgId || !bracket) return;
+            $('.age-bar-clickable').removeClass('active');
+            $(this).addClass('active');
+            showLoading('Loading people for age ' + bracket + '...', false);
+            $('#age-drilldown').show().html('<div class="empty-state">Loading people...</div>');
+            ajaxPost({
+                action: 'get_age_people',
+                org_id: currentOrgId,
+                bracket: bracket
+            }, function(data) {
+                if (data.error) {
+                    $('#age-drilldown').html('<div class="info-banner">' + esc(data.error) + '</div>');
+                    return;
+                }
+                var peopleIds = collectPeopleIds(data.people);
+                var html = '<div class="finance-drill-title">';
+                html += '<span>Age ' + esc(data.label) + ' — ' + (data.count || 0) + ' people</span>';
+                html += drillActionsHtml({
+                    peopleIds: peopleIds,
+                    closeBtnId: 'btn-close-age-drill'
+                });
+                html += '</div>';
+                if (!data.people || !data.people.length) {
+                    html += '<div class="empty-state">No people found in this age group.</div>';
+                } else {
+                    html += '<table class="people-table"><thead><tr><th>Person</th><th>Age</th></tr></thead><tbody>';
+                    data.people.forEach(function(p) {
+                        html += '<tr><td>';
+                        if (p.people_id) {
+                            html += personLink(p.people_id, p.name);
+                        } else {
+                            html += esc(p.name);
+                        }
+                        html += '</td><td>' + (p.age == null ? 'Unknown' : p.age) + '</td></tr>';
+                    });
+                    html += '</tbody></table>';
+                }
+                $('#age-drilldown').html(html).show();
+            }, { showLoading: true });
+        });
+
+        $(document).on('click', '#btn-close-age-drill', function() {
+            $('#age-drilldown').hide().empty();
+            $('.age-bar-clickable').removeClass('active');
+        });
+
+        $(document).on('click', '.stat-card-clickable[data-gender]', function() {
+            var gender = String($(this).attr('data-gender') || '');
+            if (!currentOrgId || !gender) return;
+            $('.stat-card-clickable[data-gender]').removeClass('active');
+            $(this).addClass('active');
+            var label = gender === 'female' ? 'Female' : 'Male';
+            showLoading('Loading ' + label.toLowerCase() + ' members...', false);
+            $('#gender-drilldown').show().html('<div class="empty-state">Loading people...</div>');
+            ajaxPost({
+                action: 'get_gender_people',
+                org_id: currentOrgId,
+                gender: gender
+            }, function(data) {
+                if (data.error) {
+                    $('#gender-drilldown').html('<div class="info-banner">' + esc(data.error) + '</div>');
+                    return;
+                }
+                var peopleIds = collectPeopleIds(data.people);
+                var html = '<div class="section" style="margin:0;">';
+                html += '<div class="finance-drill-title">';
+                html += '<span>' + esc(data.label) + ' — ' + (data.count || 0) + ' people</span>';
+                html += drillActionsHtml({
+                    peopleIds: peopleIds,
+                    closeBtnId: 'btn-close-gender-drill'
+                });
+                html += '</div>';
+                if (!data.people || !data.people.length) {
+                    html += '<div class="empty-state">No people found for this gender.</div>';
+                } else {
+                    html += '<table class="people-table"><thead><tr><th>Person</th></tr></thead><tbody>';
+                    data.people.forEach(function(p) {
+                        html += '<tr><td>';
+                        if (p.people_id) {
+                            html += personLink(p.people_id, p.name);
+                        } else {
+                            html += esc(p.name);
+                        }
+                        html += '</td></tr>';
+                    });
+                    html += '</tbody></table>';
+                }
+                html += '</div>';
+                $('#gender-drilldown').html(html).show();
+            }, { showLoading: true });
+        });
+
+        $(document).on('click', '#btn-close-gender-drill', function() {
+            $('#gender-drilldown').hide().empty();
+            $('.stat-card-clickable[data-gender]').removeClass('active');
+        });
+
+        function filterGradePeople(people, genderFilter) {
+            genderFilter = genderFilter || 'all';
+            if (genderFilter === 'all') return people || [];
+            return (people || []).filter(function(p) {
+                return (p.gender || '') === genderFilter;
+            });
+        }
+
+        function gradeFilterLabel(filter) {
+            if (filter === 'male') return 'Male';
+            if (filter === 'female') return 'Female';
+            if (filter === 'unknown') return 'Unknown';
+            return 'All';
+        }
+
+        function renderGradeDrilldown() {
+            var allPeople = gradeDrillState.people || [];
+            var filter = gradeDrillState.filter || 'all';
+            var filtered = filterGradePeople(allPeople, filter);
+            var maleCount = filterGradePeople(allPeople, 'male').length;
+            var femaleCount = filterGradePeople(allPeople, 'female').length;
+            var peopleIds = collectPeopleIds(filtered);
+            var title = 'Grade ' + esc(gradeDrillState.label);
+            if (filter !== 'all') {
+                title += ' · ' + esc(gradeFilterLabel(filter));
+            }
+            title += ' — ' + filtered.length + ' people';
+
+            var html = '<div class="finance-drill-title">';
+            html += '<span>' + title + '</span>';
+            html += drillActionsHtml({
+                peopleIds: peopleIds,
+                closeBtnId: 'btn-close-grade-drill'
+            });
+            html += '</div>';
+            html += '<div class="grade-gender-filters">';
+            html += '<button type="button" class="grade-gender-filter' + (filter === 'all' ? ' active' : '') + '" data-grade-gender="all">All (' + allPeople.length + ')</button>';
+            html += '<button type="button" class="grade-gender-filter' + (filter === 'male' ? ' active' : '') + '" data-grade-gender="male">Male (' + maleCount + ')</button>';
+            html += '<button type="button" class="grade-gender-filter' + (filter === 'female' ? ' active' : '') + '" data-grade-gender="female">Female (' + femaleCount + ')</button>';
+            html += '</div>';
+            if (!filtered.length) {
+                html += '<div class="empty-state">No people found for this grade' +
+                    (filter === 'all' ? '' : ' / ' + gradeFilterLabel(filter).toLowerCase()) + '.</div>';
+            } else {
+                html += '<table class="people-table"><thead><tr><th>Person</th><th>Grade</th><th>Gender</th></tr></thead><tbody>';
+                filtered.forEach(function(p) {
+                    html += '<tr><td>';
+                    if (p.people_id) {
+                        html += personLink(p.people_id, p.name);
+                    } else {
+                        html += esc(p.name);
+                    }
+                    html += '</td><td>' + esc(p.grade || gradeDrillState.label) + '</td>';
+                    html += '<td>' + esc(gradeFilterLabel(p.gender || 'unknown')) + '</td></tr>';
+                });
+                html += '</tbody></table>';
+            }
+            $('#grade-drilldown').html(html).show();
+        }
+
+        $(document).on('click', '.grade-bar-clickable', function() {
+            var grade = String($(this).attr('data-grade') || '');
+            if (!currentOrgId || !grade) return;
+            $('.grade-bar-clickable').removeClass('active');
+            $(this).addClass('active');
+            showLoading('Loading people for grade ' + grade + '...', false);
+            $('#grade-drilldown').show().html('<div class="empty-state">Loading people...</div>');
+            ajaxPost({
+                action: 'get_grade_people',
+                org_id: currentOrgId,
+                grade: grade
+            }, function(data) {
+                if (data.error) {
+                    $('#grade-drilldown').html('<div class="info-banner">' + esc(data.error) + '</div>');
+                    return;
+                }
+                gradeDrillState = {
+                    label: data.label || grade,
+                    people: data.people || [],
+                    filter: 'all'
+                };
+                renderGradeDrilldown();
+            }, { showLoading: true });
+        });
+
+        $(document).on('click', '.grade-gender-filter', function() {
+            var next = String($(this).attr('data-grade-gender') || 'all');
+            gradeDrillState.filter = next;
+            renderGradeDrilldown();
+        });
+
+        $(document).on('click', '#btn-close-grade-drill', function() {
+            $('#grade-drilldown').hide().empty();
+            $('.grade-bar-clickable').removeClass('active');
+            gradeDrillState = { label: '', people: [], filter: 'all' };
+        });
+
+        $(document).on('click', '.marital-bar-clickable', function() {
+            var status = String($(this).attr('data-marital-status') || '');
+            if (!currentOrgId || !status) return;
+            $('.marital-bar-clickable').removeClass('active');
+            $(this).addClass('active');
+            showLoading('Loading people for ' + status + '...', false);
+            $('#marital-drilldown').show().html('<div class="empty-state">Loading people...</div>');
+            ajaxPost({
+                action: 'get_marital_people',
+                org_id: currentOrgId,
+                status: status
+            }, function(data) {
+                if (data.error) {
+                    $('#marital-drilldown').html('<div class="info-banner">' + esc(data.error) + '</div>');
+                    return;
+                }
+                var peopleIds = collectPeopleIds(data.people);
+                var html = '<div class="finance-drill-title">';
+                html += '<span>' + esc(data.label) + ' — ' + (data.count || 0) + ' people</span>';
+                html += drillActionsHtml({
+                    peopleIds: peopleIds,
+                    closeBtnId: 'btn-close-marital-drill'
+                });
+                html += '</div>';
+                if (!data.people || !data.people.length) {
+                    html += '<div class="empty-state">No people found for this marital status.</div>';
+                } else {
+                    html += '<table class="people-table"><thead><tr><th>Person</th><th>Marital Status</th></tr></thead><tbody>';
+                    data.people.forEach(function(p) {
+                        html += '<tr><td>';
+                        if (p.people_id) {
+                            html += personLink(p.people_id, p.name);
+                        } else {
+                            html += esc(p.name);
+                        }
+                        html += '</td><td>' + esc(p.marital_status || data.label) + '</td></tr>';
+                    });
+                    html += '</tbody></table>';
+                }
+                $('#marital-drilldown').html(html).show();
+            }, { showLoading: true });
+        });
+
+        $(document).on('click', '#btn-close-marital-drill', function() {
+            $('#marital-drilldown').hide().empty();
+            $('.marital-bar-clickable').removeClass('active');
+        });
+
+        $(document).on('click', '.subgroup-item-clickable', function() {
+            var subgroupId = String($(this).attr('data-subgroup-id') || '');
+            var subgroupName = String($(this).attr('data-subgroup-name') || 'Subgroup');
+            if (!currentOrgId || !subgroupId) return;
+            $('.subgroup-item-clickable').removeClass('active');
+            $(this).addClass('active');
+            showLoading('Loading people for ' + subgroupName + '...', false);
+            $('#subgroup-drilldown').show().html('<div class="empty-state">Loading people...</div>');
+            ajaxPost({
+                action: 'get_subgroup_people',
+                org_id: currentOrgId,
+                subgroup_id: subgroupId
+            }, function(data) {
+                if (data.error) {
+                    $('#subgroup-drilldown').html('<div class="info-banner">' + esc(data.error) + '</div>');
+                    return;
+                }
+                var peopleIds = collectPeopleIds(data.people);
+                var html = '<div class="finance-drill-title">';
+                html += '<span>' + esc(data.label) + ' — ' + (data.count || 0) + ' people</span>';
+                html += drillActionsHtml({
+                    peopleIds: peopleIds,
+                    closeBtnId: 'btn-close-subgroup-drill'
+                });
+                html += '</div>';
+                if (!data.people || !data.people.length) {
+                    html += '<div class="empty-state">No people found in this subgroup.</div>';
+                } else {
+                    html += '<table class="people-table"><thead><tr><th>Person</th></tr></thead><tbody>';
+                    data.people.forEach(function(p) {
+                        html += '<tr><td>';
+                        if (p.people_id) {
+                            html += personLink(p.people_id, p.name);
+                        } else {
+                            html += esc(p.name);
+                        }
+                        html += '</td></tr>';
+                    });
+                    html += '</tbody></table>';
+                }
+                $('#subgroup-drilldown').html(html).show();
+            }, { showLoading: true });
+        });
+
+        $(document).on('click', '#btn-close-subgroup-drill', function() {
+            $('#subgroup-drilldown').hide().empty();
+            $('.subgroup-item-clickable').removeClass('active');
+        });
+
         $(document).on('click', '.finance-stat-clickable', function() {
             var status = String($(this).data('finance-status') || '');
             if (!currentOrgId || !status) return;
@@ -2174,11 +3167,15 @@ else:
                 var money = function(n) {
                     return '$' + (n || 0).toFixed(2).replace(/\d(?=(\d{3})+\.)/g, '$&,');
                 };
+                var peopleIds = collectPeopleIds(data.people);
                 var html = '<div class="finance-drill-title">';
                 html += '<span>' + esc(data.label) + ' — ' + (data.count || 0) + ' people</span>';
-                html += '<button type="button" class="btn-back" id="btn-close-finance-drill">Close</button>';
+                html += drillActionsHtml({
+                    peopleIds: peopleIds,
+                    closeBtnId: 'btn-close-finance-drill'
+                });
                 html += '</div>';
-                if (!data.people || !data.ople.length) {
+                if (!data.people || !data.people.length) {
                     html += '<div class="empty-state">No people found for this category.</div>';
                 } else {
                     html += '<table class="people-table"><thead><tr><th>Person</th><th>Paid</th><th>Balance Due</th></tr></thead><tbody>';
@@ -2211,7 +3208,11 @@ else:
                     return;
                 }
 
-                $('#org-name').text(data.org_name);
+                $('#org-name').html(
+                    '<a href="/Org/' + esc(String(currentOrgId || orgId)) + '" target="_blank" rel="noopener noreferrer">' +
+                    esc(data.org_name) +
+                    '</a>'
+                );
                 $('#org-info').text(data.program_name + ' - ' + data.division_name);
 
                 // Mobile/Sites title graphic (Photo / Sites hero) + optional channel logo
@@ -2244,7 +3245,9 @@ else:
                 $('#dash-tabs').addClass('visible');
 
                 $('#selector-content').slideUp();
-                $('#selector-card h2').html('<i class="fa fa-search"></i> Find Involvement <span id="toggle-selector" style="float:right; cursor:pointer;"><i class="fa fa-chevron-down"></i></span>');
+                $('#selector-card h2')
+                    .addClass('selector-toggleable')
+                    .html('<i class="fa fa-search"></i> Find Involvement <span id="toggle-selector" style="float:right;"><i class="fa fa-chevron-down"></i></span>');
 
                 // Reset to Overview tab
                 $('.dash-tab').removeClass('active');
@@ -2254,9 +3257,15 @@ else:
 
                 var statsHtml = '';
                 statsHtml += '<div class="stat-card"><div class="stat-label">Total Members</div><div class="stat-value">' + data.total_members + '</div></div>';
-                statsHtml += '<div class="stat-card"><div class="stat-label">Male</div><div class="stat-value">' + data.male_count + '</div></div>';
-                statsHtml += '<div class="stat-card"><div class="stat-label">Female</div><div class="stat-value">' + data.female_count + '</div></div>';
+                statsHtml += '<div class="stat-card stat-card-clickable" data-gender="male">';
+                statsHtml += '<div class="stat-label">Male</div><div class="stat-value">' + data.male_count + '</div>';
+                statsHtml += '<div class="stat-drill-hint">Click to view people</div></div>';
+                statsHtml += '<div class="stat-card stat-card-clickable" data-gender="female">';
+                statsHtml += '<div class="stat-label">Female</div><div class="stat-value">' + data.female_count + '</div>';
+                statsHtml += '<div class="stat-drill-hint">Click to view people</div></div>';
                 $('#stats-grid').html(statsHtml);
+                $('#gender-drilldown').hide().empty();
+                gradeDrillState = { label: '', people: [], filter: 'all' };
 
                 var profile = data.overview_profile || {};
                 $('#age-section').hide();
@@ -2266,14 +3275,14 @@ else:
 
                 if (profile.show_age && data.age_groups) {
                     var ageHtml = '';
-                    var ageOrder = ['0-12', '13-17', '18-25', '26-35', '36-50', '51-65', '66+', 'Unknown'];
+                    var ageOrder = ['0-5', '6-10', '11-13', '14-17', '18-24', '25-29', '30-39', '40-49', '50-64', '65+', 'Unknown'];
                     var maxAge = Math.max.apply(null, Object.values(data.age_groups).concat([0]));
                     ageOrder.forEach(function(ageGroup) {
                         if (data.age_groups[ageGroup] && data.age_groups[ageGroup] > 0) {
                             var count = data.age_groups[ageGroup];
                             var pct = maxAge > 0 ? Math.round((count / maxAge) * 100) : 0;
                             var totalPct = data.total_members > 0 ? Math.round((count / data.total_members) * 100) : 0;
-                            ageHtml += '<div class="chart-bar">';
+                            ageHtml += '<div class="chart-bar age-bar-clickable" data-age-bracket="' + esc(ageGroup) + '">';
                             ageHtml += '<div class="chart-label">' + esc(ageGroup) + '</div>';
                             ageHtml += '<div class="chart-bar-container"><div class="chart-bar-fill" style="width:' + pct + '%;">' + totalPct + '%</div></div>';
                             ageHtml += '<div class="chart-count">' + count + '</div></div>';
@@ -2281,7 +3290,10 @@ else:
                     });
                     $('#distribution-title').html('<i class="fa fa-chart-bar"></i> Age Distribution');
                     $('#age-chart').html(ageHtml);
+                    $('#age-drilldown').hide().empty();
                     $('#age-section').show();
+                } else {
+                    $('#age-drilldown').hide().empty();
                 }
 
                 if (profile.show_grade && data.grades && data.grades.length) {
@@ -2292,13 +3304,16 @@ else:
                         if (!g.count) return;
                         var pct = maxGrade > 0 ? Math.round((g.count / maxGrade) * 100) : 0;
                         var totalPct = data.total_members > 0 ? Math.round((g.count / data.total_members) * 100) : 0;
-                        gradeHtml += '<div class="chart-bar">';
+                        gradeHtml += '<div class="chart-bar grade-bar-clickable" data-grade="' + esc(g.label) + '">';
                         gradeHtml += '<div class="chart-label">' + esc(g.label) + '</div>';
                         gradeHtml += '<div class="chart-bar-container"><div class="chart-bar-fill" style="width:' + pct + '%;">' + totalPct + '%</div></div>';
                         gradeHtml += '<div class="chart-count">' + g.count + '</div></div>';
                     });
                     $('#grade-chart').html(gradeHtml);
+                    $('#grade-drilldown').hide().empty();
                     $('#grade-section').show();
+                } else {
+                    $('#grade-drilldown').hide().empty();
                 }
 
                 if (profile.show_marital && data.marital_status && Object.keys(data.marital_status).length > 0) {
@@ -2308,12 +3323,16 @@ else:
                         var count = data.marital_status[status];
                         var pct = maxMarital > 0 ? Math.round((count / maxMarital) * 100) : 0;
                         var totalPct = data.total_members > 0 ? Math.round((count / data.total_members) * 100) : 0;
-                        maritalHtml += '<div class="chart-bar"><div class="chart-label">' + esc(status) + '</div>';
+                        maritalHtml += '<div class="chart-bar marital-bar-clickable" data-marital-status="' + esc(status) + '">';
+                        maritalHtml += '<div class="chart-label">' + esc(status) + '</div>';
                         maritalHtml += '<div class="chart-bar-container"><div class="chart-bar-fill" style="width:' + pct + '%;">' + totalPct + '%</div></div>';
                         maritalHtml += '<div class="chart-count">' + count + '</div></div>';
                     }
                     $('#marital-chart').html(maritalHtml);
+                    $('#marital-drilldown').hide().empty();
                     $('#marital-section').show();
+                } else {
+                    $('#marital-drilldown').hide().empty();
                 }
 
                 if (data.transactions && data.transactions.total > 0) {
@@ -2369,19 +3388,21 @@ else:
                 if (data.subgroups && data.subgroups.length > 0) {
                     var subgroupHtml = '<ul class="subgroup-list">';
                     data.subgroups.forEach(function(subgroup) {
-                        subgroupHtml += '<li class="subgroup-item"><span class="subgroup-name">' + esc(subgroup.name) + '</span>';
+                        subgroupHtml += '<li class="subgroup-item subgroup-item-clickable" data-subgroup-id="' + esc(String(subgroup.id || '')) + '" data-subgroup-name="' + esc(subgroup.name) + '">';
+                        subgroupHtml += '<span class="subgroup-name">' + esc(subgroup.name) + '</span>';
                         subgroupHtml += '<span class="subgroup-count">' + subgroup.count + '</span></li>';
                     });
                     subgroupHtml += '</ul>';
                     $('#subgroup-list').html(subgroupHtml);
+                    $('#subgroup-drilldown').hide().empty();
                     $('#subgroup-section').show();
                 } else {
                     $('#subgroup-section').hide();
+                    $('#subgroup-drilldown').hide().empty();
                 }
 
                 regState = { view: 'summary', question: null, option: null, person: null, summary: null };
                 $('#reg-view').html('<div class="empty-state">Open the Registration tab to load question summaries.</div>');
-                $('#btn-export-reg').hide();
 
                 $('#dashboard-content').fadeIn();
             }, { showLoading: true });
@@ -2408,7 +3429,6 @@ else:
             ajaxPost({ action: 'get_registration_summary', org_id: currentOrgId }, function(data) {
                 if (data.error) {
                     $('#reg-view').html('<div class="info-banner">Error: ' + esc(data.error) + '</div>');
-                    $('#btn-export-reg').hide();
                     return;
                 }
                 regState.summary = data;
@@ -2423,18 +3443,15 @@ else:
         function renderRegistrationSummary(data) {
             renderBreadcrumb();
             if (!data.is_registration_form) {
-                $('#btn-export-reg').hide();
                 $('#reg-view').html('<div class="info-banner">' + esc(data.message) + '</div>');
                 return;
             }
 
             if (!data.questions || data.questions.length === 0) {
-                $('#btn-export-reg').hide();
                 $('#reg-view').html('<div class="empty-state">' + esc(data.message || 'No registration questions found.') + '</div>');
                 return;
             }
 
-            $('#btn-export-reg').show();
             var html = '<div class="reg-meta" style="margin-bottom:14px;">Completed registrants: <strong>' + data.completed_count + '</strong></div>';
 
             if (data.message) {
@@ -2469,7 +3486,7 @@ else:
         function findQuestion(qid) {
             if (!regState.summary || !regState.summary.questions) return null;
             for (var i = 0; i < regState.summary.questions.length; i++) {
-                if (regStae.summary.questions[i].id === qid) return regState.summary.questions[i];
+                if (regState.summary.questions[i].id === qid) return regState.summary.questions[i];
             }
             return null;
         }
@@ -2493,7 +3510,7 @@ else:
                 html += '<h3 style="margin:16px 0 8px;">' + esc(q.label) + '</h3>';
                 html += '<div class="reg-meta">' + q.answered + ' answered / ' + q.blank + ' blank — click an option to see who selected it</div>';
                 var maxC = 0;
-                (q.options || []).forEach(functioo) { if (o.count > maxC) maxC = o.count; });
+                (q.options || []).forEach(function(o) { if (o.count > maxC) maxC = o.count; });
                 (q.options || []).forEach(function(o) {
                     var barPct = maxC > 0 ? Math.round((o.count / maxC) * 100) : 0;
                     html += '<div class="chart-bar clickable-option" data-ovalue="' + encodeURIComponent(o.value) + '" data-otext="' + encodeURIComponent(o.text) + '">';
@@ -2516,9 +3533,17 @@ else:
         }
 
         function renderTextAnswers(q, data) {
-            var html = '<button type="button" class="btn-back" data-nav="summary"><i class="fa fa-arrow-left"></i> Back</button>';
-            html += '<h3 style="margin:16px 0 8px;">' + esc(q.label) + '</h3>';
-            html += '<div class="reg-meta">' + (data.answered_people || []).length + ' answered / ' + (data.blank_people || []).length + ' blank</div>';
+            var answeredIds = collectPeopleIds(data.answered_people);
+            var blankIds = collectPeopleIds(data.blank_people);
+            var html = '<div class="finance-drill-title">';
+            html += '<span>' + esc(q.label) + '</span>';
+            html += drillActionsHtml({ backNav: 'summary', peopleIds: answeredIds });
+            html += '</div>';
+            html += '<div class="reg-meta">' + (data.answered_people || []).length + ' answered / ' + (data.blank_people || []).length + ' blank';
+            if (answeredIds.length) {
+                html += ' — Add to Tag uses the answered list';
+            }
+            html += '</div>';
             html += '<table class="people-table"><thead><tr><th>Person</th><th>Answer</th></tr></thead><tbody>';
             (data.answered_people || []).forEach(function(p) {
                 html += '<tr><td>' + personLink(p.people_id, p.name);
@@ -2527,7 +3552,11 @@ else:
             });
             html += '</tbody></table>';
             if (data.blank_people && data.blank_people.length) {
-                html += '<h4 style="margin-top:20px;">Blank</h4><ul>';
+                html += '<div class="finance-drill-title" style="margin-top:20px;">';
+                html += '<h4 style="margin:0;">Blank</h4>';
+                html += drillActionsHtml({ peopleIds: blankIds });
+                html += '</div>';
+                html += '<ul>';
                 data.blank_people.forEach(function(p) {
                     html += '<li>' + personLink(p.people_id, p.name) + '</li>';
                 });
@@ -2590,9 +3619,12 @@ else:
                     $('#reg-view').html('<div class="info-banner">' + esc(data.error) + '</div>');
                     return;
                 }
-                var html = '<button type="button" class="btn-back" data-nav="question"><i class="fa fa-arrow-left"></i> Back</button>';
-                html += '<h3 style="margin:16px 0 8px;">' + esc(regState.question.label) + ' — ' + esc(o.text) + '</h3>';
-                html += 'iv class="reg-meta">' + (data.people || []).length + ' people</div>';
+                var peopleIds = collectPeopleIds(data.people);
+                var html = '<div class="finance-drill-title">';
+                html += '<span>' + esc(regState.question.label) + ' — ' + esc(o.text) + '</span>';
+                html += drillActionsHtml({ backNav: 'question', peopleIds: peopleIds });
+                html += '</div>';
+                html += '<div class="reg-meta">' + (data.people || []).length + ' people</div>';
                 html += '<table class="people-table"><thead><tr><th>Person</th><th>Answer</th></tr></thead><tbody>';
                 (data.people || []).forEach(function(p) {
                     html += '<tr><td>' + personLink(p.people_id, p.name);
@@ -2617,42 +3649,6 @@ else:
             }
         });
 
-        $('#btn-export-reg').click(function() {
-            if (!currentOrgId) return;
-            showLoading('Preparing Excel export...', true);
-            ajaxPost({ action: 'export_registration', org_id: currentOrgId }, function(data) {
-                if (data.error) {
-                    alert(data.error);
-                    return;
-                }
-                var lines = ['PeopleId,Name,Question,Answer'];
-                (data.rows || []).forEach(function(r) {
-                    lines.push([
-                        csvCell(r.people_id),
-                        csvCell(r.name),
-                        csvCell(r.question),
-                        csvCell(r.answer)
-                    ].join(','));
-                });
-                var blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
-                var url = URL.createObjectURL(blob);
-                var a = document.createElement('a');
-                a.href = url;
-                a.download = data.filename || 'registration-answers.csv';
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                URL.revokeObjectURL(url);
-            }, { showLoading: true });
-        });
-
-        function csvCell(v) {
-            var s = String(v == null ? '' : v);
-            if (/[",\n\r]/.test(s)) {
-                return '"' + s.replace(/"/g, '""') + '"';
-            }
-            return s;
-        }
     }
 
     if (window.jQuery) {
