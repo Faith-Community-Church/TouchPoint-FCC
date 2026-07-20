@@ -3,9 +3,9 @@
 # Purpose: Involvement demographics/finance dashboard with a Registration tab that
 #   summarizes new Registration Form (type 26) question responses and supports
 #   drill-down to options/people/full Q&A.
-#   Find involvements via name search. Finance shows Amt>0 payment groups with
-#   paid-in-full vs remaining-balance counts. Overview demographics can vary by
-#   Program Id (see PROGRAM_OVERVIEW_PROFILES).
+#   Find involvements via name search (OrgSearch-style LimitToRole + OrgLeadersOnly).
+#   Finance shows Amt>0 payment groups with paid-in-full vs remaining-balance counts.
+#   Overview demographics can vary by Program Id (see PROGRAM_OVERVIEW_PROFILES).
 # Author: Ben Swaby (base dashboard); Jake Pierson (Registration tab)
 # Date: 2026-07-20
 # Email: bswaby@fbchtn.org
@@ -245,6 +245,131 @@ def _data(name, default=None):
     if hasattr(model.Data, name):
         return getattr(model.Data, name)
     return default
+
+
+# ---------------------------------------------------------------------------
+# Org visibility (mirrors dbo.OrgSearch: LimitToRole + OrgLeadersOnly)
+# ---------------------------------------------------------------------------
+
+# Applied to queries that alias Organizations as o. Params: @userId, @pid, @olo
+_ORG_ACCESS_SQL = """
+  AND (
+        o.LimitToRole IS NULL
+        OR EXISTS (
+            SELECT NULL
+            FROM dbo.Roles r
+            INNER JOIN dbo.UserRole ur ON ur.RoleId = r.RoleId
+            WHERE ur.UserId = @userId
+              AND r.RoleName = o.LimitToRole
+        )
+      )
+  AND (
+        @olo = 0
+        OR EXISTS (
+            SELECT NULL
+            FROM (
+                SELECT om.OrganizationId AS OrgId
+                FROM dbo.OrganizationMembers om
+                WHERE om.PeopleId = @pid
+                UNION
+                SELECT o2.OrganizationId
+                FROM dbo.Organizations o2
+                WHERE o2.ParentOrgId IN (
+                    SELECT om.OrganizationId
+                    FROM dbo.OrganizationMembers om
+                    WHERE om.PeopleId = @pid
+                )
+                UNION
+                SELECT o3.OrganizationId
+                FROM dbo.Organizations o3
+                WHERE o3.ParentOrgId IN (
+                    SELECT o2.OrganizationId
+                    FROM dbo.Organizations o2
+                    WHERE o2.ParentOrgId IN (
+                        SELECT om.OrganizationId
+                        FROM dbo.OrganizationMembers om
+                        WHERE om.PeopleId = @pid
+                    )
+                )
+            ) allowed
+            WHERE allowed.OrgId = o.OrganizationId
+        )
+      )
+"""
+
+
+def _auth_context():
+    """Current user PeopleId / UserId and OrgLeadersOnly flag."""
+    pid = 0
+    try:
+        if model.UserPeopleId:
+            pid = int(model.UserPeopleId)
+    except:
+        pid = 0
+    olo = False
+    try:
+        olo = bool(model.UserIsInRole('OrgLeadersOnly'))
+    except:
+        olo = False
+    uid = 0
+    if pid > 0:
+        try:
+            p = _dd()
+            p.AddValue('pid', pid)
+            rows = list(q.QuerySql(
+                "SELECT TOP 1 UserId FROM dbo.Users WHERE PeopleId = @pid ORDER BY UserId",
+                p
+            ))
+            if rows:
+                uid = _i(rows[0].UserId, 0)
+        except:
+            uid = 0
+    return {
+        'people_id': pid,
+        'user_id': uid,
+        'olo': 1 if olo else 0,
+    }
+
+
+def _bind_org_access(params):
+    """Add @userId, @pid, @olo to a DynamicData param bag."""
+    auth = _auth_context()
+    params.AddValue('userId', auth['user_id'])
+    params.AddValue('pid', auth['people_id'])
+    params.AddValue('olo', auth['olo'])
+    return auth
+
+
+def _user_can_access_org(org_id):
+    """True if current user may see this involvement (OrgSearch rules)."""
+    org_id = _i(org_id, 0)
+    if org_id <= 0:
+        return False
+    auth = _auth_context()
+    if auth['people_id'] <= 0:
+        return False
+    sql = """
+SELECT TOP 1 o.OrganizationId
+FROM dbo.Organizations o
+WHERE o.OrganizationId = @orgId
+""" + _ORG_ACCESS_SQL
+    p = _dd()
+    p.AddValue('orgId', org_id)
+    _bind_org_access(p)
+    try:
+        rows = list(q.QuerySql(sql, p))
+        return len(rows) > 0
+    except:
+        return False
+
+
+def _require_org_access(org_id):
+    """Return an error dict if access is denied; otherwise None."""
+    if _i(org_id, 0) <= 0:
+        return {'error': 'Invalid involvement'}
+    if not _user_can_access_org(org_id):
+        return {'error': 'You do not have access to this involvement.'}
+    return None
 
 
 def _json_safe(obj):
@@ -1309,7 +1434,8 @@ if is_ajax:
             if len(term) < 2:
                 _json_out([])
             else:
-                # Active involvements by name; also allow exact Id match when term is numeric
+                # Active involvements by name; also allow exact Id match when term is numeric.
+                # Visibility matches OrgSearch: LimitToRole + OrgLeadersOnly.
                 org_id_term = _i(term, 0)
                 sql = """
 SELECT TOP 30
@@ -1325,6 +1451,7 @@ WHERE o.OrganizationStatusId = 30
         o.OrganizationName LIKE '%' + @term + '%'
         OR (@orgIdTerm > 0 AND o.OrganizationId = @orgIdTerm)
       )
+""" + _ORG_ACCESS_SQL + """
 ORDER BY
     CASE WHEN o.OrganizationName LIKE @term + '%' THEN 0 ELSE 1 END,
     o.OrganizationName
@@ -1332,6 +1459,7 @@ ORDER BY
                 p = _dd()
                 p.AddValue('term', term)
                 p.AddValue('orgIdTerm', org_id_term)
+                _bind_org_access(p)
                 rows = list(q.QuerySql(sql, p))
                 result = [{
                     'id': r.OrganizationId,
@@ -1346,7 +1474,11 @@ ORDER BY
     elif action == 'get_dashboard':
         try:
             org_id = _i(_data('org_id'), 0)
-            org_sql = """
+            denied = _require_org_access(org_id)
+            if denied:
+                _json_out(denied)
+            else:
+                org_sql = """
                 SELECT o.OrganizationId, o.OrganizationName, o.RegistrationTypeId,
                        o.ImageUrl, o.BadgeUrl,
                        d.Name as DivisionName, p.Id as ProgramId, p.Name as ProgramName,
@@ -1366,264 +1498,304 @@ ORDER BY
                    AND oe.Field = s.Setting
                 WHERE o.OrganizationId = @orgId
             """
-            p = _dd()
-            p.AddValue('orgId', org_id)
-            org_info = list(q.QuerySql(org_sql, p))
+                p = _dd()
+                p.AddValue('orgId', org_id)
+                org_info = list(q.QuerySql(org_sql, p))
 
-            if not org_info:
-                _json_out({'error': 'Organization not found'})
-            else:
-                org = org_info[0]
-                program_id = _i(org.ProgramId, 0) if hasattr(org, 'ProgramId') else 0
-                profile = _overview_profile(program_id)
+                if not org_info:
+                    _json_out({'error': 'Organization not found'})
+                else:
+                    org = org_info[0]
+                    program_id = _i(org.ProgramId, 0) if hasattr(org, 'ProgramId') else 0
+                    profile = _overview_profile(program_id)
 
-                demo_sql = """
-                    SELECT
-                        pe.GenderId,
-                        CASE
-                            WHEN pe.BirthYear IS NOT NULL AND pe.BirthMonth IS NOT NULL AND pe.BirthDay IS NOT NULL
-                            THEN DATEDIFF(year, DATEFROMPARTS(pe.BirthYear, pe.BirthMonth, pe.BirthDay), GETDATE())
-                            ELSE NULL
-                        END as Age,
-                        ms.Description as MaritalStatus,
-                        om.EnrollmentDate,
-                        DATEDIFF(day, om.EnrollmentDate, GETDATE()) as DaysSinceEnrollment,
-                        COALESCE(
-                            NULLIF(LTRIM(RTRIM(gl_om.Description)), ''),
-                            NULLIF(LTRIM(RTRIM(gl_pe.Description)), ''),
-                            'Unknown'
-                        ) as GradeLabel,
-                        COALESCE(gl_om.Id, gl_pe.Id, 99999) as GradeSort
-                    FROM OrganizationMembers om
-                    JOIN People pe ON om.PeopleId = pe.PeopleId
-                    LEFT JOIN lookup.MaritalStatus ms ON pe.MaritalStatusId = ms.Id
-                    LEFT JOIN lookup.GradeLevel gl_pe ON pe.GradeLevelId = gl_pe.Id
-                    LEFT JOIN lookup.GradeLevel gl_om ON om.GradeLevelId = gl_om.Id
-                    WHERE om.OrganizationId = @orgId
-                        AND pe.IsDeceased = 0
-                """
-                p2 = _dd()
-                p2.AddValue('orgId', org_id)
-                members = list(q.QuerySql(demo_sql, p2))
+                    demo_sql = """
+                        SELECT
+                            pe.GenderId,
+                            CASE
+                                WHEN pe.BirthYear IS NOT NULL AND pe.BirthMonth IS NOT NULL AND pe.BirthDay IS NOT NULL
+                                THEN DATEDIFF(year, DATEFROMPARTS(pe.BirthYear, pe.BirthMonth, pe.BirthDay), GETDATE())
+                                ELSE NULL
+                            END as Age,
+                            ms.Description as MaritalStatus,
+                            om.EnrollmentDate,
+                            DATEDIFF(day, om.EnrollmentDate, GETDATE()) as DaysSinceEnrollment,
+                            COALESCE(
+                                NULLIF(LTRIM(RTRIM(gl_om.Description)), ''),
+                                NULLIF(LTRIM(RTRIM(gl_pe.Description)), ''),
+                                'Unknown'
+                            ) as GradeLabel,
+                            COALESCE(gl_om.Id, gl_pe.Id, 99999) as GradeSort
+                        FROM OrganizationMembers om
+                        JOIN People pe ON om.PeopleId = pe.PeopleId
+                        LEFT JOIN lookup.MaritalStatus ms ON pe.MaritalStatusId = ms.Id
+                        LEFT JOIN lookup.GradeLevel gl_pe ON pe.GradeLevelId = gl_pe.Id
+                        LEFT JOIN lookup.GradeLevel gl_om ON om.GradeLevelId = gl_om.Id
+                        WHERE om.OrganizationId = @orgId
+                            AND pe.IsDeceased = 0
+                    """
+                    p2 = _dd()
+                    p2.AddValue('orgId', org_id)
+                    members = list(q.QuerySql(demo_sql, p2))
 
-                total_members = len(members)
-                male_count = len([m for m in members if m.GenderId == 1])
-                female_count = len([m for m in members if m.GenderId == 2])
+                    total_members = len(members)
+                    male_count = len([m for m in members if m.GenderId == 1])
+                    female_count = len([m for m in members if m.GenderId == 2])
 
-                age_groups = _empty_age_groups()
-                if profile.get('show_age'):
-                    for member in members:
-                        age = member.Age if hasattr(member, 'Age') and not _is_null(member.Age) else None
-                        try:
-                            age_i = int(age) if age is not None else None
-                        except:
-                            age_i = None
-                        label = _age_bracket_label(age_i)
-                        age_groups[label] = age_groups.get(label, 0) + 1
+                    age_groups = _empty_age_groups()
+                    if profile.get('show_age'):
+                        for member in members:
+                            age = member.Age if hasattr(member, 'Age') and not _is_null(member.Age) else None
+                            try:
+                                age_i = int(age) if age is not None else None
+                            except:
+                                age_i = None
+                            label = _age_bracket_label(age_i)
+                            age_groups[label] = age_groups.get(label, 0) + 1
 
-                grades = []
-                if profile.get('show_grade'):
-                    grade_counts = {}
-                    grade_sort = {}
-                    for member in members:
-                        label = _s(member.GradeLabel, 'Unknown') if hasattr(member, 'GradeLabel') else 'Unknown'
-                        if not label or label.lower() == 'unknown':
-                            label = 'Unknown'
-                        grade_counts[label] = grade_counts.get(label, 0) + 1
-                        if label not in grade_sort:
-                            grade_sort[label] = _i(member.GradeSort, 99999) if hasattr(member, 'GradeSort') else 99999
-                    # Unknown last; otherwise by GradeLevel Id
-                    def _grade_key(item):
-                        label = item[0]
-                        if label == 'Unknown':
-                            return (1, 99999, label)
-                        return (0, grade_sort.get(label, 99999), label)
-                    for label, count in sorted(grade_counts.items(), key=_grade_key):
-                        grades.append({'label': label, 'count': count})
+                    grades = []
+                    if profile.get('show_grade'):
+                        grade_counts = {}
+                        grade_sort = {}
+                        for member in members:
+                            label = _s(member.GradeLabel, 'Unknown') if hasattr(member, 'GradeLabel') else 'Unknown'
+                            if not label or label.lower() == 'unknown':
+                                label = 'Unknown'
+                            grade_counts[label] = grade_counts.get(label, 0) + 1
+                            if label not in grade_sort:
+                                grade_sort[label] = _i(member.GradeSort, 99999) if hasattr(member, 'GradeSort') else 99999
+                        # Unknown last; otherwise by GradeLevel Id
+                        def _grade_key(item):
+                            label = item[0]
+                            if label == 'Unknown':
+                                return (1, 99999, label)
+                            return (0, grade_sort.get(label, 99999), label)
+                        for label, count in sorted(grade_counts.items(), key=_grade_key):
+                            grades.append({'label': label, 'count': count})
 
-                marital_status = {}
-                if profile.get('show_marital'):
-                    for member in members:
-                        raw = member.MaritalStatus if hasattr(member, 'MaritalStatus') and not _is_null(member.MaritalStatus) else None
-                        status = _s(raw, 'Unknown') or 'Unknown'
-                        marital_status[status] = marital_status.get(status, 0) + 1
+                    marital_status = {}
+                    if profile.get('show_marital'):
+                        for member in members:
+                            raw = member.MaritalStatus if hasattr(member, 'MaritalStatus') and not _is_null(member.MaritalStatus) else None
+                            status = _s(raw, 'Unknown') or 'Unknown'
+                            marital_status[status] = marital_status.get(status, 0) + 1
 
-                enrollment_timeline = {}
-                if profile.get('show_enrollment_timeline'):
-                    for member in members:
-                        if hasattr(member, 'EnrollmentDate') and member.EnrollmentDate:
-                            date_key = "{0:04d}-{1:02d}".format(member.EnrollmentDate.Year, member.EnrollmentDate.Month)
-                            enrollment_timeline[date_key] = enrollment_timeline.get(date_key, 0) + 1
+                    enrollment_timeline = {}
+                    if profile.get('show_enrollment_timeline'):
+                        for member in members:
+                            if hasattr(member, 'EnrollmentDate') and member.EnrollmentDate:
+                                date_key = "{0:04d}-{1:02d}".format(member.EnrollmentDate.Year, member.EnrollmentDate.Month)
+                                enrollment_timeline[date_key] = enrollment_timeline.get(date_key, 0) + 1
 
-                sorted_timeline = sorted(enrollment_timeline.items(), key=lambda x: x[0], reverse=True)[:12]
-                sorted_timeline.reverse()
+                    sorted_timeline = sorted(enrollment_timeline.items(), key=lambda x: x[0], reverse=True)[:12]
+                    sorted_timeline.reverse()
 
-                subgroup_sql = """
-                    SELECT mt.Id as SubgroupId, mt.Name as SubgroupName, COUNT(DISTINCT omt.PeopleId) as MemberCount
-                    FROM MemberTags mt
-                    INNER JOIN OrgMemMemTags omt ON mt.Id = omt.MemberTagId AND omt.OrgId = @orgId
-                    WHERE mt.OrgId = @orgId
-                    GROUP BY mt.Id, mt.Name
-                    HAVING COUNT(DISTINCT omt.PeopleId) > 0
-                    ORDER BY mt.Name
-                """
-                p3 = _dd()
-                p3.AddValue('orgId', org_id)
-                subgroups = list(q.QuerySql(subgroup_sql, p3))
+                    subgroup_sql = """
+                        SELECT mt.Id as SubgroupId, mt.Name as SubgroupName, COUNT(DISTINCT omt.PeopleId) as MemberCount
+                        FROM MemberTags mt
+                        INNER JOIN OrgMemMemTags omt ON mt.Id = omt.MemberTagId AND omt.OrgId = @orgId
+                        WHERE mt.OrgId = @orgId
+                        GROUP BY mt.Id, mt.Name
+                        HAVING COUNT(DISTINCT omt.PeopleId) > 0
+                        ORDER BY mt.Name
+                    """
+                    p3 = _dd()
+                    p3.AddValue('orgId', org_id)
+                    subgroups = list(q.QuerySql(subgroup_sql, p3))
 
-                # Payment groups (OriginalId chain) with Amt > 0 only.
-                # Balance = Amtdue on the latest transaction in the group.
-                transaction_sql = """
-;WITH Raw AS (
+                    # Payment groups (OriginalId chain) with Amt > 0 only.
+                    # Balance = Amtdue on the latest transaction in the group.
+                    transaction_sql = """
+    ;WITH Raw AS (
+        SELECT
+            ISNULL(t.OriginalId, t.Id) AS GroupId,
+            t.Id,
+            t.Amt,
+            t.Amtdue,
+            t.TransactionDate
+        FROM [Transaction] t
+        WHERE t.OrgId = @orgId
+    ),
+    Grouped AS (
+        SELECT
+            GroupId,
+            SUM(ISNULL(Amt, 0)) AS GroupPaid
+        FROM Raw
+        GROUP BY GroupId
+        HAVING SUM(ISNULL(Amt, 0)) > 0
+    ),
+    Latest AS (
+        SELECT
+            r.GroupId,
+            ISNULL(r.Amtdue, 0) AS BalanceDue,
+            ROW_NUMBER() OVER (
+                PARTITION BY r.GroupId
+                ORDER BY r.TransactionDate DESC, r.Id DESC
+            ) AS rn
+        FROM Raw r
+        INNER JOIN Grouped g ON g.GroupId = r.GroupId
+    )
     SELECT
-        ISNULL(t.OriginalId, t.Id) AS GroupId,
-        t.Id,
-        t.Amt,
-        t.Amtdue,
-        t.TransactionDate
-    FROM [Transaction] t
-    WHERE t.OrgId = @orgId
-),
-Grouped AS (
-    SELECT
-        GroupId,
-        SUM(ISNULL(Amt, 0)) AS GroupPaid
-    FROM Raw
-    GROUP BY GroupId
-    HAVING SUM(ISNULL(Amt, 0)) > 0
-),
-Latest AS (
-    SELECT
-        r.GroupId,
-        ISNULL(r.Amtdue, 0) AS BalanceDue,
-        ROW_NUMBER() OVER (
-            PARTITION BY r.GroupId
-            ORDER BY r.TransactionDate DESC, r.Id DESC
-        ) AS rn
-    FROM Raw r
-    INNER JOIN Grouped g ON g.GroupId = r.GroupId
-)
-SELECT
-    COUNT(*) AS TotalTransactions,
-    SUM(CASE WHEN l.BalanceDue <= 0 THEN 1 ELSE 0 END) AS PaidInFullCount,
-    SUM(CASE WHEN l.BalanceDue > 0 THEN 1 ELSE 0 END) AS RemainingBalanceCount,
-    SUM(g.GroupPaid) AS TotalPaid,
-    SUM(CASE WHEN l.BalanceDue > 0 THEN l.BalanceDue ELSE 0 END) AS TotalDue
-FROM Grouped g
-INNER JOIN Latest l ON l.GroupId = g.GroupId AND l.rn = 1
-"""
-                p4 = _dd()
-                p4.AddValue('orgId', org_id)
-                transaction_result = list(q.QuerySql(transaction_sql, p4))
-                transactions = transaction_result[0] if transaction_result else None
+        COUNT(*) AS TotalTransactions,
+        SUM(CASE WHEN l.BalanceDue <= 0 THEN 1 ELSE 0 END) AS PaidInFullCount,
+        SUM(CASE WHEN l.BalanceDue > 0 THEN 1 ELSE 0 END) AS RemainingBalanceCount,
+        SUM(g.GroupPaid) AS TotalPaid,
+        SUM(CASE WHEN l.BalanceDue > 0 THEN l.BalanceDue ELSE 0 END) AS TotalDue
+    FROM Grouped g
+    INNER JOIN Latest l ON l.GroupId = g.GroupId AND l.rn = 1
+    """
+                    p4 = _dd()
+                    p4.AddValue('orgId', org_id)
+                    transaction_result = list(q.QuerySql(transaction_sql, p4))
+                    transactions = transaction_result[0] if transaction_result else None
 
-                result = {
-                    'org_name': org.OrganizationName,
-                    'program_id': program_id,
-                    'program_name': org.ProgramName if hasattr(org, 'ProgramName') and org.ProgramName else 'None',
-                    'division_name': org.DivisionName if hasattr(org, 'DivisionName') and org.DivisionName else 'None',
-                    'title_graphic_url': _s(org.TitleGraphicUrl) if hasattr(org, 'TitleGraphicUrl') else '',
-                    'badge_url': _s(org.BadgeUrl) if hasattr(org, 'BadgeUrl') else '',
-                    'registration_type_id': _i(org.RegistrationTypeId, 0),
-                    'is_registration_form': _i(org.RegistrationTypeId, 0) == REGISTRATION_FORM_TYPE,
-                    'overview_profile': profile,
-                    'total_members': total_members,
-                    'male_count': male_count,
-                    'female_count': female_count,
-                    'age_groups': age_groups if profile.get('show_age') else {},
-                    'grades': grades,
-                    'marital_status': marital_status if profile.get('show_marital') else {},
-                    'enrollment_timeline': dict(sorted_timeline) if profile.get('show_enrollment_timeline') else {},
-                    'subgroups': [{'id': _i(s.SubgroupId), 'name': _s(s.SubgroupName), 'count': _i(s.MemberCount)} for s in subgroups],
-                    'transactions': {
-                        'total': int(transactions.TotalTransactions) if transactions and transactions.TotalTransactions else 0,
-                        'paid_in_full': int(transactions.PaidInFullCount) if transactions and transactions.PaidInFullCount else 0,
-                        'remaining_balance': int(transactions.RemainingBalanceCount) if transactions and transactions.RemainingBalanceCount else 0,
-                        'total_paid': float(transactions.TotalPaid) if transactions and transactions.TotalPaid else 0,
-                        'total_due': float(transactions.TotalDue) if transactions and transactions.TotalDue else 0,
+                    result = {
+                        'org_name': org.OrganizationName,
+                        'program_id': program_id,
+                        'program_name': org.ProgramName if hasattr(org, 'ProgramName') and org.ProgramName else 'None',
+                        'division_name': org.DivisionName if hasattr(org, 'DivisionName') and org.DivisionName else 'None',
+                        'title_graphic_url': _s(org.TitleGraphicUrl) if hasattr(org, 'TitleGraphicUrl') else '',
+                        'badge_url': _s(org.BadgeUrl) if hasattr(org, 'BadgeUrl') else '',
+                        'registration_type_id': _i(org.RegistrationTypeId, 0),
+                        'is_registration_form': _i(org.RegistrationTypeId, 0) == REGISTRATION_FORM_TYPE,
+                        'overview_profile': profile,
+                        'total_members': total_members,
+                        'male_count': male_count,
+                        'female_count': female_count,
+                        'age_groups': age_groups if profile.get('show_age') else {},
+                        'grades': grades,
+                        'marital_status': marital_status if profile.get('show_marital') else {},
+                        'enrollment_timeline': dict(sorted_timeline) if profile.get('show_enrollment_timeline') else {},
+                        'subgroups': [{'id': _i(s.SubgroupId), 'name': _s(s.SubgroupName), 'count': _i(s.MemberCount)} for s in subgroups],
+                        'transactions': {
+                            'total': int(transactions.TotalTransactions) if transactions and transactions.TotalTransactions else 0,
+                            'paid_in_full': int(transactions.PaidInFullCount) if transactions and transactions.PaidInFullCount else 0,
+                            'remaining_balance': int(transactions.RemainingBalanceCount) if transactions and transactions.RemainingBalanceCount else 0,
+                            'total_paid': float(transactions.TotalPaid) if transactions and transactions.TotalPaid else 0,
+                            'total_due': float(transactions.TotalDue) if transactions and transactions.TotalDue else 0,
+                        }
                     }
-                }
-                _json_out(result)
+                    _json_out(result)
         except Exception, e:
             _err_out(e)
 
     elif action == 'get_registration_summary':
         try:
             org_id = _i(_data('org_id'), 0)
-            _json_out(_build_registration_summary(org_id))
+            denied = _require_org_access(org_id)
+            if denied:
+                _json_out(denied)
+            else:
+                _json_out(_build_registration_summary(org_id))
         except Exception, e:
             _err_out(e)
 
     elif action == 'get_option_people':
         try:
             org_id = _i(_data('org_id'), 0)
-            question_id = _s(_data('question_id'))
-            option_value = _s(_data('option_value'))
-            _json_out(_get_option_people(org_id, question_id, option_value))
+            denied = _require_org_access(org_id)
+            if denied:
+                _json_out(denied)
+            else:
+                question_id = _s(_data('question_id'))
+                option_value = _s(_data('option_value'))
+                _json_out(_get_option_people(org_id, question_id, option_value))
         except Exception, e:
             _err_out(e)
 
     elif action == 'get_text_answers':
         try:
             org_id = _i(_data('org_id'), 0)
-            question_id = _s(_data('question_id'))
-            _json_out(_get_text_answers(org_id, question_id))
+            denied = _require_org_access(org_id)
+            if denied:
+                _json_out(denied)
+            else:
+                question_id = _s(_data('question_id'))
+                _json_out(_get_text_answers(org_id, question_id))
         except Exception, e:
             _err_out(e)
 
     elif action == 'get_person_answers':
         try:
             org_id = _i(_data('org_id'), 0)
-            people_id = _i(_data('people_id'), 0)
-            _json_out(_get_person_answers(org_id, people_id))
+            denied = _require_org_access(org_id)
+            if denied:
+                _json_out(denied)
+            else:
+                people_id = _i(_data('people_id'), 0)
+                _json_out(_get_person_answers(org_id, people_id))
         except Exception, e:
             _err_out(e)
 
     elif action == 'get_age_people':
         try:
             org_id = _i(_data('org_id'), 0)
-            bracket = _s(_data('bracket'))
-            _json_out(_get_age_people(org_id, bracket))
+            denied = _require_org_access(org_id)
+            if denied:
+                _json_out(denied)
+            else:
+                bracket = _s(_data('bracket'))
+                _json_out(_get_age_people(org_id, bracket))
         except Exception, e:
             _err_out(e)
 
     elif action == 'get_grade_people':
         try:
             org_id = _i(_data('org_id'), 0)
-            grade = _s(_data('grade'))
-            _json_out(_get_grade_people(org_id, grade))
+            denied = _require_org_access(org_id)
+            if denied:
+                _json_out(denied)
+            else:
+                grade = _s(_data('grade'))
+                _json_out(_get_grade_people(org_id, grade))
         except Exception, e:
             _err_out(e)
 
     elif action == 'get_gender_people':
         try:
             org_id = _i(_data('org_id'), 0)
-            gender = _s(_data('gender'))
-            _json_out(_get_gender_people(org_id, gender))
+            denied = _require_org_access(org_id)
+            if denied:
+                _json_out(denied)
+            else:
+                gender = _s(_data('gender'))
+                _json_out(_get_gender_people(org_id, gender))
         except Exception, e:
             _err_out(e)
 
     elif action == 'get_marital_people':
         try:
             org_id = _i(_data('org_id'), 0)
-            status = _s(_data('status'))
-            _json_out(_get_marital_people(org_id, status))
+            denied = _require_org_access(org_id)
+            if denied:
+                _json_out(denied)
+            else:
+                status = _s(_data('status'))
+                _json_out(_get_marital_people(org_id, status))
         except Exception, e:
             _err_out(e)
 
     elif action == 'get_subgroup_people':
         try:
             org_id = _i(_data('org_id'), 0)
-            subgroup_id = _i(_data('subgroup_id'), 0)
-            _json_out(_get_subgroup_people(org_id, subgroup_id))
+            denied = _require_org_access(org_id)
+            if denied:
+                _json_out(denied)
+            else:
+                subgroup_id = _i(_data('subgroup_id'), 0)
+                _json_out(_get_subgroup_people(org_id, subgroup_id))
         except Exception, e:
             _err_out(e)
 
     elif action == 'get_finance_people':
         try:
             org_id = _i(_data('org_id'), 0)
-            status = _s(_data('status'))
-            _json_out(_get_finance_people(org_id, status))
+            denied = _require_org_access(org_id)
+            if denied:
+                _json_out(denied)
+            else:
+                status = _s(_data('status'))
+                _json_out(_get_finance_people(org_id, status))
         except Exception, e:
             _err_out(e)
 
