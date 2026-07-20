@@ -1,0 +1,2670 @@
+#Roles=Access
+# Script: InvolvementDashboard.py
+# Purpose: Involvement demographics/finance dashboard with a Registration tab that
+#   summarizes new Registration Form (type 26) question responses, supports
+#   drill-down to options/people/full Q&A, and Excel (CSV) export.
+#   Find involvements via name search. Finance shows Amt>0 payment groups with
+#   paid-in-full vs remaining-balance counts. Overview demographics can vary by
+#   Program Id (see PROGRAM_OVERVIEW_PROFILES).
+# Author: Ben Swaby (base dashboard); Jake Pierson (Registration tab)
+# Date: 2026-07-20
+# Email: bswaby@fbchtn.org
+#
+# Install: Special Content -> Python Scripts -> name InvolvementDashboard
+# Run: /PyScriptForm/InvolvementDashboard
+#
+# IronPython notes (TouchPoint embeds IronPython 2.7):
+#   - Use print without parentheses; except Exception, ex
+#   - Put UI in model.Form on GET (PyScriptForm ignores Output)
+#   - Prefer model.DynamicData() for SQL params
+#   - Prefer token replace over .format() for large HTML (JS braces break format)
+#   - Never unicode(byte_string) with default encoding ('unknown' codec);
+#     use _s() / _json_out() for safe text + ASCII JSON (handles ö / 0xF6)
+
+import json
+import traceback
+
+# Soft-set default encoding so implicit str<->unicode coercions don't use 'unknown'
+try:
+    import sys
+    reload(sys)
+    sys.setdefaultencoding('latin-1')
+except:
+    pass
+
+REGISTRATION_FORM_TYPE = 26
+STATUS_COMPLETED = 2
+
+# Overview question types: choice + text. Emergency/Parents only on person drill-down.
+# Money skipped for v1 (refine later). Other structural types skipped.
+QTYPE_TEXT = 1
+QTYPE_SINGLE = 2
+QTYPE_MULTI = 3
+QTYPE_DROPDOWN = 6
+QTYPE_EMERGENCY = 8
+QTYPE_PARENTS = 12
+QTYPE_MONEY = 11
+
+OVERVIEW_CHOICE_TYPES = (QTYPE_SINGLE, QTYPE_MULTI, QTYPE_DROPDOWN)
+OVERVIEW_TEXT_TYPES = (QTYPE_TEXT,)
+PERSON_EXTRA_TYPES = (QTYPE_EMERGENCY, QTYPE_PARENTS)
+
+SUBTYPE_MENU = 1
+
+# ---------------------------------------------------------------------------
+# Program-specific Overview profiles
+# Edit this block to customize demographics by Program Id.
+# Anything not listed here uses DEFAULT_OVERVIEW_PROFILE.
+# ---------------------------------------------------------------------------
+DEFAULT_OVERVIEW_PROFILE = {
+    'show_age': True,
+    'show_grade': False,
+    'show_marital': True,
+    'show_enrollment_timeline': True,
+    # Future knobs (not wired yet — safe to set for later):
+    # 'show_gender_stats': True,
+    # 'show_finance': True,
+    # 'show_subgroups': True,
+}
+
+PROGRAM_OVERVIEW_PROFILES = {
+    # Next Generation
+    1112: {
+        'name': 'Next Generation',
+        'show_age': False,
+        'show_grade': True,
+        'show_marital': False,
+        'show_enrollment_timeline': True,
+    },
+    # Example for a future program:
+    # 9999: {
+    #     'name': 'Example Program',
+    #     'show_age': True,
+    #     'show_grade': False,
+    #     'show_marital': True,
+    #     'show_enrollment_timeline': True,
+    # },
+}
+
+
+def _overview_profile(program_id):
+    """Merge program overrides onto the default overview profile."""
+    profile = {}
+    for k, v in DEFAULT_OVERVIEW_PROFILE.items():
+        profile[k] = v
+    overrides = PROGRAM_OVERVIEW_PROFILES.get(_i(program_id), None)
+    if overrides:
+        for k, v in overrides.items():
+            if k != 'name':
+                profile[k] = v
+        profile['profile_name'] = _s(overrides.get('name'), '')
+    else:
+        profile['profile_name'] = ''
+    profile['program_id'] = _i(program_id)
+    return profile
+
+
+def _is_null(val):
+    if val is None:
+        return True
+    try:
+        from System import DBNull
+        if val is DBNull.Value:
+            return True
+    except:
+        pass
+    return False
+
+
+def _s(val, default=''):
+    """
+    Convert any DB/CLR/byte value to a pure Python unicode string.
+    Avoids IronPython's default 'unknown' codec (byte 0xF6 = ö in cp1252/latin-1).
+    Never call bare unicode(bytes) or .decode() on a unicode string.
+    """
+    if _is_null(val):
+        return default
+    try:
+        from System import String as NetString
+        from System.Text import Encoding
+
+        net = None
+
+        # True Python 2 byte string (not unicode / System.String)
+        try:
+            is_py_bytes = isinstance(val, str) and not isinstance(val, unicode)
+        except:
+            is_py_bytes = False
+
+        if is_py_bytes:
+            # latin-1 accepts every byte (0xF6 -> ö)
+            s = val.decode('latin-1').strip()
+        else:
+            # System.String / unicode / numbers / other CLR objects
+            try:
+                if isinstance(val, NetString):
+                    net = val
+                else:
+                    net = NetString.Format('{0}', val)
+            except:
+                try:
+                    net = NetString(val.ToString())
+                except:
+                    return default
+
+            if net is None:
+                return default
+
+            # Round-trip via UTF-8 bytes -> Python unicode (detaches from CLR quirks)
+            utf8 = Encoding.UTF8.GetBytes(net)
+            buf = []
+            i = 0
+            while i < utf8.Length:
+                buf.append(chr(utf8[i] & 0xFF))
+                i += 1
+            s = ''.join(buf).decode('utf-8').strip()
+
+        if s == '' or s == 'None' or s == 'null':
+            return default
+        return s
+    except:
+        # Last resort: keep only ASCII
+        try:
+            raw = repr(val)
+            out = []
+            for ch in raw:
+                try:
+                    o = ord(ch)
+                    if 32 <= o <= 126:
+                        out.append(chr(o))
+                except:
+                    pass
+            s = ''.join(out).strip()
+            return s if s else default
+        except:
+            return default
+
+
+def _i(val, default=0):s = _s(val)
+    if not s:
+        return default
+    try:
+        return int(s)
+    except:
+        try:
+            return int(float(s))
+        except:
+            return default
+
+
+def _dd():
+    return model.DynamicData()
+
+
+def _data(name, default=None):
+    if hasattr(model.Data, name):
+        return getattr(model.Data, name)
+    return default
+
+
+def _json_safe(obj):
+    """Recursively coerce values to JSON-friendly Python types."""
+    if obj is None:
+        return None
+    if isinstance(obj, bool):
+        return obj
+    try:
+        if isinstance(obj, (int, long)) and not isinstance(obj, bool):
+            return int(obj)
+        if isinstance(obj, float):
+            return float(obj)
+    except:
+        try:
+            if isinstance(obj, int) and not isinstance(obj, bool):
+                return int(obj)
+            if isinstance(obj, float):
+                return float(obj)
+        except:
+            pass
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            out[_s(k, u'')] = _json_safe(v)
+        return out
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(x) for x in obj]
+    # CLR Decimal / numeric
+    try:
+        from System import Decimal as NetDecimal
+        if isinstance(obj, NetDecimal):
+            return float(obj)
+    except:
+        pass
+    try:
+        if not isinstance(obj, (str, unicode)):
+            return float(obj)
+    except:
+        pass
+    return _s(obj, u'')
+
+
+def _json_quote(s):
+    """Quote a string as ASCII-only JSON (\\uXXXX for non-ASCII)."""
+    s = _s(s, u'')
+    parts = ['"']
+    for ch in s:
+        o = ord(ch)
+        if ch == u'"':
+            parts.append('\\"')
+        elif ch == u'\\':
+            parts.append('\\\\')
+        elif ch == u'\b':
+            parts.append('\\b')
+        elif ch == u'\f':
+            parts.append('\\f')
+        elif ch == u'\n':
+            parts.append('\\n')
+        elif ch == u'\r':
+            parts.append('\\r')
+        elif ch == u'\t':
+            parts.append('\\t')
+        elif o < 0x20 or o > 0x7e:
+            parts.append('\\u%04x' % o)
+        else:
+            parts.append(chr(o))
+    parts.append('"')
+    return ''.join(parts)
+
+
+def _json_dump(obj):
+    """Manual JSON serializer — avoids IronPython json.dumps codec issues."""
+    obj = _json_safe(obj)
+    return _json_dump_raw(obj)
+
+
+def _json_dump_raw(obj):
+    if obj is None:
+        return 'null'
+    if obj is True:
+        return 'true'
+    if obj is False:
+        return 'false'
+    try:
+        if isinstance(ob (int, long)) and not isinstance(obj, bool):
+            return str(int(obj))
+    except:
+        if isinstance(obj, int) and not isinstance(obj, bool):
+            return str(int(obj))
+    if isinstance(obj, float):
+        # Ensure JSON-legal number formatting
+        try:
+            if obj != obj:  # NaN
+                return 'null'
+            if obj == float('inf') or obj == float('-inf'):
+                return 'null'
+        except:
+            pass
+        return repr(float(obj))
+    if isinstance(obj, dict):
+        items = []
+        for k, v in obj.items():
+            items.append(_json_quote(_s(k)) + ':' + _json_dump_raw(v))
+        return '{' + ','.join(items) + '}'
+    if isinstance(obj, (list, tuple)):
+        return '[' + ','.join([_json_dump_raw(x) for x in obj]) + ']'
+    return _json_quote(_s(obj))
+
+
+def _json_out(obj):
+    print _json_dump(obj)
+
+
+def _err_out(e):
+    """Safe AJAX error payload (exception text can also contain non-ASCII)."""
+    try:
+        tb = _s(traceback.format_exc())
+    except:
+        tb = ''
+    _json_out({'error': _s(e), 'traceback': tb})
+
+
+def _parse_answer(raw):
+    """Parse RegAnswer.AnswerValue (usually JSON string / array)."""
+    s = _s(raw)
+    if not s:
+        return None
+    try:
+        return json.loads(s)
+    except:
+        return s
+
+
+def _answer_display(val, question_type_id, sub_type_id, options):
+    """Human-readable answer for text/export/person view."""
+    if val is None:
+        return ''
+    if question_type_id == QTYPE_EMERGENCY:
+        parts = _s(val).split('\n')
+        name = _s(parts[0] if parts else '')
+        phone = _s(parts[1] if len(parts) > 1 else '')
+        if name and phone:
+            return name + ' / ' + phone
+        return name or phone
+    if question_type_id == QTYPE_PARENTS:
+        parts = _s(val).split('\n')
+        mother = _s(parts[0] if parts else '')
+        father = _s(parts[1] if len(parts) > 1 else '')
+        bits = []
+        if mother:
+            bits.append('Mother: ' + mother)
+        if father:
+            bits.append('Father: ' + father)
+        return '; '.join(bits)
+    if sub_type_id == SUBTYPE_MENU and isinstance(val, list) and options:
+        bits = []
+        i = 0
+        while i < len(options) and i < len(val):
+            qty = _s(val[i])
+            if qty and qty != '0':
+                bits.append(_s(options[i].get('text'), 'Option') + ': ' + qty)
+            i += 1
+        return '; '.join(bits)
+    if isinstance(val, list):
+        return ', '.join([_s(x) for x in val if _s(x)])
+    return _s(val)
+
+
+def _is_blank_answer(val):
+    if val is None:
+        return True
+    if isinstance(val, list):
+        for x in val:
+            if _s(x) and _s(x) != '0':
+                return False
+        return True
+    s = _s(val)
+    if not s:
+        return True
+    # Emergency/Parents often store "null\nnull"
+    if s.replace('\n', '').replace('null', '').strip() == '':
+        return True
+    return False
+
+
+def _parse_options(options_json):
+    raw = _s(options_json)
+    if not raw:
+        return []
+    try:
+        opts = json.loads(raw)
+    except:
+        return []
+    result = []
+    if not isinstance(opts, list):
+        return result
+    for o in opts:
+        if not isinstance(o, dict):
+            continue
+        text = _s(o.get('text') or o.get('Text'))
+        value = _s(o.get('value') or o.get('Value') or text)
+        result.append({
+            'text': text or value,
+            'value': value or text,
+            'other': bool(o.get('other') or o.get('Other')),
+        })
+    return result
+
+
+def _org_meta(org_id):
+    sql = """
+SELECT o.OrganizationId, o.OrganizationName, o.RegistrationTypeId,
+       d.Name AS DivisionName, p.Name AS ProgramName
+FROM Organizations o
+LEFT JOIN Division d ON o.DivisionId = d.Id
+LEFT JOIN Program p ON d.ProgId = p.Id
+WHERE o.OrganizationId = @orgId
+"""
+    p = _dd()
+    p.AddValue('orgId', org_id)
+    rows = list(q.QuerySql(sql, p))
+    if not rows:
+        return None
+    return rows[0]
+
+
+def _completed_registrants(org_id):
+    """Most recent completed RegPeople per PeopleId for the involvement."""
+    sql = """
+;WITH Ranked AS (
+    SELECT
+        rp.RegPeopleId,
+        rp.PeopleId,
+        rp.CompletedDate,
+        ISNULL(pe.Name2, LTRIM(RTRIM(ISNULL(rp.FirstName,'') + ' ' + ISNULL(rp.LastName,'')))) AS PersonName,
+        ROW_NUMBER() OVER (
+            PARTITION BY rp.PeopleId
+            ORDER BY rp.CompletedDate DESC, rp.RegPeopleId
+        ) AS rn
+    FROM dbo.RegPeople rp
+    INNER JOIN dbo.Registration r ON r.RegistrationId = rp.RegistrationId
+    LEFT JOIN dbo.People pe ON pe.PeopleId = rp.PeopleId
+    WHERE r.OrganizationId = @orgId
+      AND rp.Status = @status
+      AND rp.CompletedDate IS NOT NULL
+      AND rp.PeopleId IS NOT NULL
+)
+SELECT RegPeopleId, PeopleId, CompletedDate, PersonName
+FROM Ranked
+WHERE rn = 1
+ORDER BY PersonName
+"""
+    p = _dd()
+    p.AddValue('orgId', org_id)
+    p.AddValue('status', STATUS_COMPLETED)
+    return list(q.QuerySql(sql, p))
+
+
+def _questions_for_org(org_id):
+    sql = """
+SELECT RegQuestionId, [Order], Label, QuestionTypeId, QuestionSubTypeId,
+       IsRequired, IsDisabled, Options
+FROM dbo.RegQuestion
+WHERE OrganizationId = @orgId
+  AND ISNULL(IsDisabled, 0) = 0
+ORDER BY [Order], Label
+"""
+    p = _dd()
+    p.AddValue('orgId', org_id)
+    return list(q.QuerySql(sql, p))
+
+
+def _answers_for_registrants(org_id, question_ids):
+    """All answers for completed registrants (most recent per person) for given questions."""
+    if not question_ids:
+        return []
+    # Build IN list of quoted guids (safe: from our own query)
+    id_list = ','.join(["'" + _s(qid).replace("'", "") + "'" for qid in question_ids])
+    sql = """
+;WITH Ranked AS (
+    SELECT
+        rp.RegPeopleId,
+        rp.PeopleId,
+        ROW_NUMBER() OVER (
+            PARTITION BY rp.PeopleId
+            ORDER BY rp.CompletedDate DESC, rp.RegPeopleId
+        ) AS rn
+    FROM dbo.RegPeople rp
+    INNER JOIN dbo.Registration r ON r.RegistrationId = rp.RegistrationId
+    WHERE r.OrganizationId = @orgId
+      AND rp.Status = @status
+      AND rp.CompletedDate IS NOT NULL
+      AND rp.PeopleId IS NOT NULL
+)
+SELECT ra.RegQuestionId, ra.RegPeopleId, ra.AnswerValue,
+       rk.PeopleId,
+       ISNULL(pe.Name2, '') AS PersonName
+FROM Ranked rk
+INNER JOIN dbo.RegAnswer ra ON ra.RegPeopleId = rk.RegPeopleId
+LEFT JOIN dbo.People pe ON pe.PeopleId = rk.PeopleId
+WHERE rk.rn = 1
+  AND ra.RegQuestionId IN ({0})
+""".format(id_list)
+    p = _dd()
+    p.AddValue('orgId', org_id)
+    p.AddValue('status', STATUS_COMPLETED)
+    return list(q.QuerySql(sql, p))
+
+
+def _choice_selected_values(parsed, options, sub_type_id):
+    """Return list of option values this answer selected (for counting)."""
+    selected = []
+    if parsed is None:
+        return selected
+    if sub_type_id == SUBTYPE_MENU and isinstance(parsed, list):
+        i = 0
+        while i < len(options) and i < len(parsed):
+            qty = _s(parsed[i])
+            if qty and qty != '0':
+                selected.append(options[i]['value'])
+            i += 1
+        return selected
+    values = parsed if isinstance(parsed, list) else [parsed]
+    opt_by_text = {}
+    opt_by_value = {}
+    for o in options:
+        opt_by_text[o['text']] = o['value']
+        opt_by_value[o['value']] = o['value']
+    for v in values:
+        sv = _s(v)
+        if not sv:
+            continue
+        if sv in opt_by_value:
+            selected.append(opt_by_value[sv])
+        elif sv in opt_by_text:
+            selected.append(opt_by_text[sv])
+        else:
+            # Free-text "Other" or unmatched — count under raw value
+            selected.append(sv)
+    return selected
+
+
+def _build_registration_summary(org_id):
+    org = _org_meta(org_id)
+    if not org:
+        return {'error': 'Organization not found'}
+
+    reg_type = _i(org.RegistrationTypeId, 0)
+    if reg_type != REGISTRATION_FO_TYPE:
+        return {
+            'is_registration_form': False,
+            'org_name': _s(org.OrganizationName),
+            'message': 'This involvement is not using the new Registration Form architecture. Registration question summaries are only available for Registration Form involvements.',
+            'questions': [],
+            'completed_count': 0,
+            'empty': True,
+        }
+
+    registrants = _completed_registrants(org_id)
+    completed_count = len(registrants)
+    questions = _questions_for_org(org_id)
+
+    overview_qs = []
+    for qrow in questions:
+        qt = _i(qrow.QuestionTypeId, 0)
+        if qt in OVERVIEW_CHOICE_TYPES or qt in OVERVIEW_TEXT_TYPES:
+            overview_qs.append(qrow)
+        # Money and structural types intentionally skipped
+
+    if not overview_qs:
+        return {
+            'is_registration_form': True,
+            'org_name': _s(org.OrganizationName),
+            'completed_count': completed_count,
+            'questions': [],
+            'empty': True,
+            'message': 'No registration questions are configured for this involvement yet.',
+        }
+
+    qids = [_s(qrow.RegQuestionId) for qrow in overview_qs]
+    answers = _answers_for_registrants(org_id, qids)
+
+    # Index answers by question
+    by_q = {}
+    for a in answers:
+        qid = _s(a.RegQuestionId)
+        if qid not in by_q:
+            by_q[qid] = []
+        by_q[qid].append(a)
+
+    result_questions = []
+
+    for qrow in overview_qs:
+        qid = _s(qrow.RegQuestionId)
+        qt = _i(qrow.QuestionTypeId, 0)
+        st = _i(qrow.QuestionSubTypeId, 0) if not _is_null(qrow.QuestionSubTypeId) else 0
+        label = _s(qrow.Label, '(Untitled question)')
+        options = _parse_options(qrow.Options)
+        q_answers = by_q.get(qid, [])
+
+        answered_people = set()
+        blank_count = 0
+        parsed_by_person = []
+
+        # Map RegPeopleId -> answer for this question
+        ans_by_rp = {}
+        for a in q_answers:
+            ans_by_rp[_s(a.RegPeopleId)] = a
+
+        for reg in registrants:
+            rp_id = _s(reg.RegPeopleId)
+            a = ans_by_rp.get(rp_id)
+            parsed = _parse_answer(a.AnswerValue) if a else None
+            if _is_blank_answer(parsed):
+                blank_count += 1
+            else:
+                answered_people.add(_i(reg.PeopleId))
+                parsed_by_person.append({
+                    'people_id': _i(reg.PeopleId),
+                    'name': _s(reg.PersonName),
+                    'parsed': parsed,
+                    'raw_display': _answer_display(parsed, qt, st, options),
+                })
+
+        answered_count = len(answered_people)
+        # blank_count already counts registrants with no/blank answer
+        item = {
+            'id': qid,
+            'label': label,
+            'type_id': qt,
+            'sub_type_id': st,
+            'answered': answered_count,
+            'blank': blank_count,
+        }
+
+        if qt in OVERVIEW_CHOICE_TYPES:
+            item['kind'] = 'choice'
+            counts = {}
+            for o in options:
+                counts[o['value']] = 0
+            other_counts = {}
+            for row in parsed_by_person:
+                for sel in _choice_selected_values(row['parsed'], options, st):
+                    if sel in counts:
+                        counts[sel] += 1
+                    else:
+                        other_counts[sel] = other_counts.get(sel, 0) + 1
+            opt_out = []
+            for o in options:
+                c = counts.get(o['value'], 0)
+                pct = int(round((100.0 * c / answered_count), 0)) if answered_count else 0
+                opt_out.append({
+                    'value': o['value'],
+                    'text': o['text'],
+                    'count': c,
+                    'pct': pct,
+                })
+            for ov, c in sorted(other_counts.items(), key=lambda x: (-x[1], x[0])):
+                pct = int(round((100.0 * c / answered_count), 0)) if answered_count else 0
+                opt_out.append({
+                    'value': ov,
+                    'text': ov + ' (other)',
+                    'count': c,
+                    'pct': pct,
+                })
+            item['options'] = opt_out
+        else:
+            item['kind'] = 'text'
+            previews = []
+            for row in parsed_by_person[:5]:
+                disp = row['raw_display']
+                if len(disp) > 80:
+                    disp = disp[:77] + '...'
+                previews.append(disp)
+            item['preview'] = previews
+
+        result_questions.append(item)
+
+    empty = completed_count == 0 or (
+        sum([qitem['answered'] for qitem in result_questions]) == 0
+        and len(result_questions) > 0
+        and all(qitem['answered'] == 0 for qitem in result_questions)
+    )
+
+    return {
+        'is_registration_form': True,
+        'org_name': _s(org.OrganizationName),
+        'completed_count': completed_count,
+        'questions': result_questions,
+        'empty': empty and len(result_questions) == 0,
+        'message': (
+            'No completed registration answers yet.'
+            if completed_count == 0 or all(qitem['answered'] == 0 for qitem in result_questions)
+            else ''
+        ),
+    }
+
+
+def _get_option_people(org_id, question_id, option_value):
+    questions = _questions_for_org(org_id)
+    qrow = None
+    for q in questions:
+        if _s(q.RegQuestionId) == _s(question_id):
+            qrow = q
+            break
+    if not qrow:
+        return {'error': 'Question not found'}
+
+    qt = _i(qrow.QuestionTypeId, 0)
+    st = _i(qrow.QuestionSubTypeId, 0) if not _is_null(qrow.QuestionSubTypeId) else 0
+    options = _parse_options(qrow.Options)
+    registrants = _completed_registrants(org_id)
+    answers = _answers_for_registrants(org_id, [_s(question_id)])
+    ans_by_rp = {}
+    for a in answers:
+        ans_by_rp[_s(a.RegPeopleId)] = a
+
+    target = _s(option_value)
+    people = []
+    for reg in registrants:
+        a = ans_by_rp.get(_s(reg.RegPeopleId))
+        parsed = _parse_answer(a.AnswerValue) if a else None
+        if _is_blank_answer(parsed):
+            continue
+        selected = _choice_selected_values(parsed, options, st)
+        if target in selected:
+            people.append({
+                'people_id': _i(reg.PeopleId),
+                'name': _s(reg.PersonName),
+                'answer': _answer_display(parsed, qt, st, options),
+            })
+    return {
+        'question_id': _s(question_id),
+        'question_label': _s(qrow.Label),
+        'option_value': target,
+        'people': people,
+    }
+
+
+def _get_text_answers(org_id, question_id):
+    questions = _questions_for_org(org_id)
+    qrow = None
+    for q in questions:
+        if _s(q.RegQuestionId) == _s(question_id):
+            qrow = q
+            break
+    if not qrow:
+        return {'error': 'Question not found'}
+
+    qt = _i(qrow.QuestionTypeId, 0)
+    st = _i(qrow.QuestionSubTypeId, 0) if not _is_null(qrow.QuestionSubTypeId) else 0
+    options = _parse_options(qrow.Options)
+    registrants = _completed_registrants(org_id)
+    answers = _answers_for_registrants(org_id, [_s(question_id)])
+    ans_by_rp = {}
+    for a in answers:
+        ans_by_rp[_s(a.RegPeopleId)] = a
+
+    rows = []
+    blank_people = []
+    for reg in registrants:
+        a = ans_by_rp.get(_s(reg.RegPeopleId))
+        parsed = _parse_answer(a.AnswerValue) if a else None
+        person = {
+            'people_id': _i(reg.PeopleId),
+            'name': _s(reg.PersonName),
+            'answer': _answer_display(parsed, qt, st, options),
+        }
+        if _is_blank_answer(parsed):
+            blank_people.append(person)
+        else:
+            rows.append(person)
+    return {
+        'question_id': _s(question_id),
+        'question_label': _s(qrow.Label),
+        'kind': 'text',
+        'answered_people': rows,
+        'blank_people': blank_people,
+    }
+
+
+def _get_person_answers(org_id, people_id):
+    org = _org_meta(org_id)
+    if not org:
+        return {'error': 'Organization not found'}
+
+    registrants = _completed_registrants(org_id)
+    reg = None
+    for r in registrants:
+        if _i(r.PeopleId) == people_id:
+            reg = r
+            break
+    if not reg:
+        return {'error': 'No completed registration found for this person'}
+
+    questions = _questions_for_org(org_id)
+    # Include overview types + emergency/parents for person view; skip other structural
+    show_types = OVERVIEW_CHOICE_TYPES + OVERVIEW_TEXT_TYPES + PERSON_EXTRA_TYPES
+    visible = [q for q in questions if _i(q.QuestionTypeId, 0) in show_types]
+    qids = [_s(q.RegQuestionId) for q in visible]
+    answers = _answers_for_registrants(org_id, qids)
+    ans_by_q = {}
+    for a in answers:
+        if _s(a.RegPeopleId) == _s(reg.RegPeopleId):
+            ans_by_q[_s(a.RegQuestionId)] = a
+
+    items = []
+    for qrow in visible:
+        qid = _s(qrow.RegQuestionId)
+        qt = _i(qrow.QuestionTypeId, 0)
+        st = _i(qrow.QuestionSubTypeId, 0) if not _is_null(qrow.QuestionSubTypeId) else 0
+        options = _parse_options(qrow.Options)
+        a = ans_by_q.get(qid)
+        parsed = _parse_answer(a.AnswerValue) if a else None
+        items.append({
+            'question_id': qid,
+            'label': _s(qrow.Label, '(Untitled)'),
+            'type_id': qt,
+            'answer': _answer_display(parsed, qt, st, options) if not _is_blank_answer(parsed) else '',
+            'blank': _is_blank_answer(parsed),
+        })
+
+    return {
+        'people_id': people_id,
+        'name': _s(reg.PersonName),
+        'profile_url': '/Person2/' + str(people_id),
+        'answers': items,
+    }
+
+
+def _export_registration_rows(org_id):
+    """One-sheet export: one row per person x question (completed only)."""
+    org = _org_meta(org_id)
+    if not org:
+        return {'error': 'Organization not found'}
+    if _i(org.RegistrationTypeId, 0) != REGISTRATION_FORM_TYPE:
+        return {'error': 'Not a Registration Form involvement'}
+
+    registrants = _completed_registrants(org_id)
+    questions = _questions_for_org(org_id)
+    show_types = OVERVIEW_CHOICE_TYPES + OVERVIEW_TEXT_TYPES + PERSON_EXTRA_TYPES
+    visible = [q for q in questions if _i(q.QuestionTypeId, 0) in show_types]
+    qids = [_s(q.RegQuestionId) for q in visible]
+    answers = _answers_for_registrants(org_id, qids)
+
+    ans_map = {}  # (regPeopleId, questionId) -> answer
+    for a in answers:
+        ans_map[(_s(a.RegPeopleId), _s(a.RegQuestionId))] = a
+
+    rows = []
+    for reg in registrants:
+        for qrow in visible:
+            qid = _s(qrow.RegQuestionId)
+            qt = _i(qrow.QuestionTypeId, 0)
+            st = _i(qrow.QuestionSubTypeId, 0) if not _is_null(qrow.QuestionSubTypeId) else 0
+            options = _parse_options(qrow.Options)
+            a = ans_map.get((_s(reg.RegPeopleId), qid))
+            parsed = _parse_answer(a.AnswerValue) if a else None
+            rows.append({
+                'people_id': _i(reg.PeopleId),
+                'name': _s(reg.PersonName),
+                'question': _s(qrow.Label),
+                'answer': '' if _is_blank_answer(parsed) else _answer_display(parsed, qt, st, options),
+            })
+
+    return {
+        'org_name': _s(org.OrganizationName),
+        'filename': 'registration-answers-' + str(org_id) + '.csv',
+        'rows': rows,
+    }
+
+
+def _get_finance_people(org_id, status):
+    """
+    People linked to payment groups (Amt>0) for an involvement.
+    status: 'paid_in_full' (balance <= 0) or 'remaining_balance' (balance > 0)
+
+    Performance notes:
+    - Filters to OrgId first, then only groups with Amt>0 and matching balance.
+    - Prefers TransactionPeople; LoginPeopleId only when a group has no TP rows.
+    - No role checks here — speed is SQL shape / data volume, not roles.
+    """
+    status _s(status)
+    if status not in ('paid_in_full', 'remaining_balance'):
+        return {'error': 'Invalid finance status'}
+
+    # Leaner query: one OrgId scan, early group filter, avoid triple UNION + CTE self-refs
+    sql = """
+;WITH TranBase AS (
+    SELECT
+        t.Id,
+        ISNULL(t.OriginalId, t.Id) AS GroupId,
+        ISNULL(t.Amt, 0) AS Amt,
+        ISNULL(t.Amtdue, 0) AS Amtdue,
+        t.TransactionDate,
+        t.LoginPeopleId
+    FROM dbo.[Transaction] t WITH (NOLOCK)
+    WHERE t.OrgId = @orgId
+),
+GroupTotals AS (
+    SELECT GroupId, SUM(Amt) AS GroupPaid
+    FROM TranBase
+    GROUP BY GroupId
+    HAVING SUM(Amt) > 0
+),
+GroupBalance AS (
+    SELECT
+        g.GroupId,
+        g.GroupPaid,
+        b.BalanceDue
+    FROM GroupTotals g
+    CROSS APPLY (
+        SELECT TOP (1) tb.Amtdue AS BalanceDue
+        FROM TranBase tb
+        WHERE tb.GroupId = g.GroupId
+        ORDER BY tb.TransactionDate DESC, tb.Id DESC
+    ) b
+    WHERE (
+        (@status = 'paid_in_full' AND b.BalanceDue <= 0)
+        OR (@status = 'remaining_balance' AND b.BalanceDue > 0)
+    )
+),
+LinkedPeople AS (
+    SELECT
+        gb.GroupId,
+        gb.GroupPaid,
+        gb.BalanceDue,
+        tp.PeopleId
+    FROM GroupBalance gb
+    INNER JOIN TranBase tb ON tb.GroupId = gb.GroupId
+    INNER JOIN dbo.TransactionPeople tp WITH (NOLOCK) ON tp.Id = tb.Id
+
+    UNION
+
+    SELECT
+        gb.GroupId,
+        gb.GroupPaid,
+        gb.BalanceDue,
+        tb.LoginPeopleId AS PeopleId
+    FROM GroupBalance gb
+    INNER JOIN TranBase tb ON tb.GroupId = gb.GroupId
+    WHERE tb.LoginPeopleId IS NOT NULL
+      AND NOT EXISTS (
+            SELECT 1
+            FROM TranBase tb2
+            INNER JOIN dbo.TransactionPeople tp2 WITH (NOLOCK) ON tp2.Id = tb2.Id
+            WHERE tb2.GroupId = gb.GroupId
+        )
+)
+SELECT
+    lp.PeopleId,
+    ISNULL(pe.Name2, LTRIM(RTRIM(ISNULL(pe.FirstName, '') + ' ' + ISNULL(pe.LastName, '')))) AS PersonName,
+    MAX(lp.GroupPaid) AS TotalPaid,
+    MAX(lp.BalanceDue) AS BalanceDue
+FROM LinkedPeople lp
+INNER JOIN dbo.People pe WITH (NOLOCK) ON pe.PeopleId = lp.PeopleId
+GROUP BY
+    lp.PeopleId,
+    ISNULL(pe.Name2, LTRIM(RTRIM(ISNULL(pe.FirstName, '') + ' ' + ISNULL(pe.LastName, ''))))
+ORDER BY PersonName
+"""
+    p = _dd()
+    p.AddValue('orgId', org_id)
+    p.AddValue('status', status)
+    rows = list(q.QuerySql(sql, p))
+    people = []
+    for r in rows:
+        pid = _i(r.PeopleId, 0) if hasattr(r, 'PeopleId') and not _is_null(r.PeopleId) else 0
+        if pid <= 0:
+            continue
+        people.append({
+            'people_id': pid,
+            'name': _s(r.PersonName, '(Unknown)'),
+            'total_paid': float(r.TotalPaid) if hasattr(r, 'TotalPaid') and r.TotalPaid else 0,
+            'balance_due': float(r.BalanceDue) if hasattr(r, 'BalanceDue') and r.BalanceDue else 0,
+        })
+    label = 'Paid in Full' if status == 'paid_in_full' else 'Remaining Balance'
+    return {
+        'status': status,
+        'label': label,
+        'people': people,
+        'count': len(people),
+    }
+
+
+# ---------------------------------------------------------------------------
+# AJAX / page entry
+# ---------------------------------------------------------------------------
+
+model.Header = 'Involvement Dashboard'
+
+is_ajax = hasattr(model.Data, 'ajax') and model.Data.ajax == 'true'
+
+if is_ajax:
+    action = _s(_data('action'))
+
+    if action == 'search_involvements':
+        try:
+            term = _s(_data('term'))
+            if len(term) < 2:
+                _json_out([])
+            else:
+                # Active involvements by name; also allow exact Id match when term is numeric
+                org_id_term = _i(term, 0)
+                sql = """
+SELECT TOP 30
+    o.OrganizationId,
+    o.OrganizationName,
+    ISNULL(d.Name, '') AS DivisionName,
+    ISNULL(p.Name, '') AS ProgramName
+FROM Organizations o
+LEFT JOIN Division d ON o.DivisionId = d.Id
+LEFT JOIN Program p ON d.ProgId = p.Id
+WHERE o.OrganizationStatusId = 30
+  AND (
+        o.OrganizationName LIKE '%' + @term + '%'
+        OR (@orgIdTerm > 0 AND o.OrganizationId = @orgIdTerm)
+      )
+ORDER BY
+    CASE WHEN o.OrganizationName LIKE @term + '%' THEN 0 ELSE 1 END,
+    o.OrganizationName
+"""
+                p = _dd()
+                p.AddValue('term', term)
+                p.AddValue('orgIdTerm', org_id_term)
+                rows = list(q.QuerySql(sql, p))
+                result = [{
+                    'id': r.OrganizationId,
+                    'name': _s(r.OrganizationName),
+                    'division': _s(r.DivisionName),
+                    'program': _s(r.ProgramName),
+                } for r in rows]
+                _json_out(result)
+        except Exception, e:
+            _err_out(e)
+
+    elif action == 'get_dashboard':
+        try:
+            org_id = _i(_data('org_id'), 0)
+            org_sql = """
+                SELECT o.OrganizationId, o.OrganizationName, o.RegistrationTypeId,
+                       o.ImageUrl, o.BadgeUrl,
+                       d.Name as DivisionName, p.Id as ProgramId, p.Name as ProgramName,
+                       COALESCE(
+                           NULLIF(LTRIM(RTRIM(oe.Data)), ''),
+                           NULLIF(LTRIM(RTRIM(oe.StrValue)), ''),
+                           NULLIF(LTRIM(RTRIM(o.ImageUrl)), '')
+                       ) AS TitleGraphicUrl
+                FROM Organizations o
+                LEFT JOIN Division d ON o.DivisionId = d.Id
+                LEFT JOIN Program p ON d.ProgId = p.Id
+                LEFT JOIN dbo.Setting s ON s.Id = 'SitesDataHeroImageEv'
+                LEFT JOIN dbo.OrganizationExtra oe
+                    ON oe.OrganizationId = o.OrganizationId
+                   AND s.Setting IS NOT NULL
+                   AND LTRIM(RTRIM(s.Setting)) <> ''
+                   AND oe.Field = s.Setting
+                WHERE o.OrganizationId = @orgId
+            """
+            p = _dd()
+            p.AddValue('orgId', org_id)
+            org_info = list(q.QuerySql(org_sql, p))
+
+            if not org_info:
+                _json_out({'error': 'Organization not found'})
+            else:
+                org = org_info[0]
+                program_id = _i(org.ProgramId, 0) if hasattr(org, 'ProgramId') else 0
+                profile = _overview_profile(program_id)
+
+                demo_sql = """
+                    SELECT
+                        pe.GenderId,
+                        CASE
+                            WHEN pe.BirthYear IS NOT NULL AND pe.BirthMonth IS NOT NULL AND pe.BirthDay IS NOT NULL
+                            THEN DATEDIFF(year, DATEFROMPARTS(pe.BirthYear, pe.BirthMonth, pe.BirthDay), GETDATE())
+                            ELSE NULL
+                        END as Age,
+                        ms.Description as MaritalStatus,
+                        om.EnrollmentDate,
+                        DATEDIFF(day, om.EnrollmentDate, GETDATE()) as DaysSinceEnrollment,
+                        COALESCE(
+                            NULLIF(LTRIM(RTRIM(gl_om.Description)), ''),
+                            NULLIF(LTRIM(RTRIM(gl_pe.Description)), ''),
+                            'Unknown'
+                        ) as GradeLabel,
+                        COALESCE(gl_om.Id, gl_pe.Id, 99999) as GradeSort
+                    FROM OrganizationMembers om
+                    JOIN People pe ON om.PeopleId = pe.PeopleId
+                    LEFT JOIN lookup.MaritalStatus ms ON pe.MaritalStatusId = ms.Id
+                    LEFT JOIN lookup.GradeLevel gl_pe ON pe.GradeLevelId = gl_pe.Id
+                    LEFT JOIN lookup.GradeLevel gl_om ON om.GradeLevelId = gl_om.Id
+                    WHERE om.OrganizationId = @orgId
+                        AND pe.IsDeceased = 0
+                """
+                p2 = _dd()
+                p2.AddValue('orgId', org_id)
+                members = list(q.QuerySql(demo_sql, p2))
+
+                total_members = len(members)
+                male_count = len([m for m in members if m.GenderId == 1])
+                female_count = len([m for m in members if m.GenderId == 2])
+
+                age_groups = {'0-12': 0, '13-17': 0, '18-25': 0, '26-35': 0, '36-50': 0, '51-65': 0, '66+': 0, 'Unknown': 0}
+                if profile.get('show_age'):
+                    for member in members:
+                        age = member.Age if hasattr(member, 'Age') and member.Age else None
+                        if age is None:
+                            age_groups['Unknown'] += 1
+                        elif age <= 12:
+                            age_groups['0-12'] += 1
+                        elif age <= 17:
+                            age_groups['13-17'] += 1
+                        elif age <= 25:
+                            age_groups['18-25'] += 1
+                        elif age <= 35:
+                            age_groups['26-35'] += 1
+                        elif age <= 50:
+                            age_groups['36-50'] += 1
+                        elif age <= 65:
+                            age_groups['51-65'] += 1
+                        else:
+                            age_groups['66+'] += 1
+
+                grades = []
+                if profile.get('show_grade'):
+                    grade_counts = {}
+                    grade_sort = {}
+                    for member in members:
+                        label = _s(member.GradeLabel, 'Unknown') if hasattr(member, 'GradeLabel') else 'Unknown'
+                        if not label or label.lower() == 'unknown':
+                            label = 'Unknown'
+                        grade_counts[label] = grade_counts.get(label, 0) + 1
+                        if label not in grade_sort:
+                            grade_sort[label] = _i(member.GradeSort, 99999) if hasattr(member, 'GradeSort') else 99999
+                    # Unknown last; otherwise by GradeLevel Id
+                    def _grade_key(item):
+                        label = item[0]
+                        if label == 'Unknown':
+                            return (1, 99999, label)
+                        return (0, grade_sort.get(label, 99999), label)
+                    for label, count in sorted(grade_counts.items(), key=_grade_key):
+                        grades.append({'label': label, 'count': count})
+
+                marital_status = {}
+                if profile.get('show_marital'):
+                    for member in members:
+                        status = member.MaritalStatus if hasattr(member, 'MaritalStatus') and member.MaritalStatus else 'Unknown'
+                        marital_status[_s(status, 'Unknown')] = marital_status.get(_s(status, 'Unknown'), 0) + 1
+
+                enrollment_timeline = {}
+                if profile.get('show_enrollment_timeline'):
+                    for member in members:
+                        if hasattr(member, 'EnrollmentDate') and member.EnrollmentDate:
+                            date_key = "{0:04d}-{1:02d}".format(member.EnrollmentDate.Year, member.EnrollmentDate.Month)
+                            enrollment_timeline[date_key] = enrollment_timeline.get(date_key, 0) + 1
+
+                sorted_timeline = sorted(enrollment_timeline.items(), key=lambda x: x[0], reverse=True)[:12]
+                sorted_timeline.reverse()
+
+                subgroup_sql = """
+                    SELECT mt.Name as SubgroupName, COUNT(DISTINCT omt.PeopleId) as MemberCount
+                    FROM MemberTags mt
+                    LEFT JOIN OrgMemMemTags omt ON mt.Id = omt.MemberTagId AND omt.OrgId = @orgId
+                    GROUP BY mt.Id, mt.Name
+                    HAVING COUNT(DISTINCT omt.PeopleId) > 0
+                    ORDER BY mt.Name
+                """
+                p3 = _dd()
+                p3.AddValue('orgId', org_id)
+                subgroups = list(q.QuerySql(subgroup_sql, p3))
+
+                # Payment groups (OriginalId chain) with Amt > 0 only.
+                # Balance = Amtdue on the latest transaction in the group.
+                transaction_sql = """
+;WITH Raw AS (
+    SELECT
+        ISNULL(t.OriginalId, t.Id) AS GroupId,
+        t.Id,
+        t.Amt,
+        t.Amtdue,
+        t.TransactionDate
+    FROM [Transaction] t
+    WHERE t.OrgId = @orgId
+),
+Grouped AS (
+    SELECT
+        GroupId,
+        SUM(ISNULL(Amt, 0)) AS GroupPaid
+    FROM Raw
+    GROUP BY GroupId
+    HAVING SUM(ISNULL(Amt, 0)) > 0
+),
+Latest AS (
+    SELECT
+        r.GroupId,
+        ISNULL(r.Amtdue, 0) AS BalanceDue,
+        ROW_NUMBER() OVER (
+            PARTITION BY r.GroupId
+            ORDER BY r.TransactionDate DESC, r.Id DESC
+        ) AS rn
+    FROM Raw r
+    INNER JOIN Grouped g ON g.GroupId = r.GroupId
+)
+SELECT
+    COUNT(*) AS TotalTransactions,
+    SUM(CASE WHEN l.BalanceDue <= 0 THEN 1 ELSE 0 END) AS PaidInFullCount,
+    SUM(CASE WHEN l.BalanceDue > 0 THEN 1 ELSE 0 END) AS RemainingBalanceCount,
+    SUM(g.GroupPaid) AS TotalPaid,
+    SUM(CASE WHEN l.BalanceDue > 0 THEN l.BalanceDue ELSE 0 END) AS TotalDue
+FROM Grouped g
+INNER JOIN Latest l ON l.GroupId = g.GroupId AND l.rn = 1
+"""
+                p4 = _dd()
+                p4.AddValue('orgId', org_id)
+                transaction_result = list(q.QuerySql(transaction_sql, p4))
+                transactions = transaction_result[0] if transaction_result else None
+
+                result = {
+                    'org_name': org.OrganizationName,
+                    'program_id': program_id,
+                    'program_name': org.ProgramName if hasattr(org, 'ProgramName') and org.ProgramName else 'None',
+                    'division_name': org.DivisionName if hasattr(org, 'DivisionName') and org.DivisionName else 'None',
+                    'title_graphic_url': _s(org.TitleGraphicUrl) if hasattr(org, 'TitleGraphicUrl') else '',
+                    'badge_url': _s(org.BadgeUrl) if hasattr(org, 'BadgeUrl') else '',
+                    'registration_type_id': _i(org.RegistrationTypeId, 0),
+                    'is_registration_form': _i(org.RegistrationTypeId, 0) == REGISTRATION_FORM_TYPE,
+                    'overview_profile': profile,
+                    'total_members': total_members,
+                    'male_count': male_count,
+                    'female_count': female_count,
+                    'age_groups': age_groups if profile.get('show_age') else {},
+                    'grades': grades,
+                    'marital_status': marital_status if profile.get('show_marital') else {},
+                    'enrollment_timeline': dict(sorted_timeline) if profile.get('show_enrollment_timeline') else {},
+                    'subgroups': [{'name': s.SubgroupName, 'count': s.MemberCount} for s in subgroups],
+                    'transactions': {
+                        'total': int(transactions.TotalTransactions) if transactions and transactions.TotalTransactions else 0,
+                        'paid_in_full': int(transactions.PaidInFullCount) if transactions and transactions.PaidInFullCount else 0,
+                        'remaining_balance': int(transactions.RemainingBalanceCount) if transactions and transactions.RemainingBalanceCount else 0,
+                        'total_paid': float(transactions.TotalPaid) if transactions and transactions.TotalPaid else 0,
+                        'total_due': float(transactions.TotalDue) if transactions and transactions.TotalDue else 0,
+                    }
+                }
+                _json_out(result)
+        except Exception, e:
+            _err_out(e)
+
+    elif action == 'get_registration_summary':
+        try:
+            org_id = _i(_data('org_id'), 0)
+            _json_out(_build_registration_summary(org_id))
+        except Exception, e:
+            _err_out(e)
+
+    elif action == 'get_option_people':
+        try:
+            org_id = _i(_data('org_id'), 0)
+            question_id = _s(_data('question_id'))
+            option_value = _s(_data('option_value'))
+            _json_out(_get_option_people(org_id, question_id, option_value))
+        except Exception, e:
+            _err_out(e)
+
+    elif action == 'get_text_answers':
+        try:
+            org_id = _i(_data('org_id'), 0)
+            question_id = _s(_data('question_id'))
+            _json_out(_get_text_answers(org_id, question_id))
+        except Exception, e:
+            _err_out(e)
+
+    elif action == 'get_person_answers':
+        try:
+            org_id = _i(_data('org_id'), 0)
+            people_id = _i(_data('people_id'), 0)
+            _json_out(_get_person_answers(org_id, people_id))
+        except Exception, e:
+            _err_out(e)
+
+    elif action == 'get_finance_people':
+        try:
+            org_id = _i(_data('org_id'), 0)
+            status = _s(_data('status'))
+            _json_out(_get_finance_people(org_id, status))
+        except Exception, e:
+            _err_out(e)
+
+    elif action == 'export_registration':
+        try:
+            org_id = _i(_data('org_id'), 0)
+            _json_out(_export_registration_rows(org_id))
+        except Exception, e:
+            _err_out(e)
+
+    else:
+        _json_out({'error': 'Unknown action'})
+
+else:
+    # Main page
+    model.Form = r'''
+<style>
+    .dashboard-container {
+        max-width: 1400px;
+        margin: 0 auto;
+        padding: 20px;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+    .selector-card {
+        background: white;
+        padding: 25px;
+        border-radius: 12px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        margin-bottom: 20px;
+    }
+    .selector-card h2 {
+        margin: 0 0 20px 0;
+        color: #1e293b;
+        font-size: 24px;
+    }
+    .selector-card select {
+        width: 100%;
+        padding: 12px;
+        font-size: 16px;
+        border: 2px solid #e2e8f0;
+        border-radius: 8px;
+        margin-bottom: 15px;
+    }
+    .selector-card input[type="text"] {
+        width: 100%;
+        padding: 12px 14px;
+        font-size: 16px;
+        border: 2px solid #e2e8f0;
+        border-radius: 8px;
+        box-sizing: border-box;
+    }
+    .selector-card input[type="text"]:focus {
+        outline: none;
+        border-color: #019cff;
+    }
+    .search-wrap {
+        position: relative;
+    }
+    .search-row {
+        display: flex;
+        gap: 10px;
+        align-items: stretch;
+    }
+    .search-row input[type="text"] {
+        flex: 1;
+        min-width: 0;
+        margin: 0;
+    }
+    .btn-search {
+        flex-shrink: 0;
+        background: linear-gradient(135deg, #012b58 0%, #019cff 100%);
+        color: #fff;
+        border: none;
+        border-radius: 8px;
+        padding: 12px 22px;
+        font-size: 16px;
+        font-weight: 600;
+        cursor: pointer;
+        white-space: nowrap;
+    }
+    .btn-search:hover {
+        opacity: 0.92;
+    }
+    .btn-search:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+    }
+    .search-results {
+        display: none;
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 100%;
+        z-index: 20;
+        background: white;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+        max-height: 320px;
+        overflow-y: auto;
+        margin-top: 4px;
+    }
+    .search-results.visible { display: block; }
+    .search-result-item {
+        padding: 12px 14px;
+        cursor: pointer;
+        border-bottom: 1px solid #f1f5f9;
+    }
+    .search-result-item:last-child { border-bottom: none; }
+    .search-result-item:hover,
+    .search-result-item.active {
+        background: #f8fafc;
+    }
+    .search-result-name {
+        font-weight: 600;
+        color: #1e293b;
+    }
+    .search-result-meta {
+        font-size: 12px;
+        color: #64748b;
+        margin-top: 2px;
+    }
+    .search-hint {
+        font-size: 13px;
+        color: #64748b;
+        margin-top: 8px;
+    }
+    .search-empty {
+        padding: 14px;
+        color: #64748b;
+        font-size: 14px;
+    }
+    .dashboard-header {
+        background: linear-gradient(135deg, #012b58 0%, #019cff 100%);
+        color: white;
+        padding: 0;
+        border-radius: 12px;
+        margin-bottom: 20px;
+        box-shadow: 0 4px 15px rgba(1, 43, 88, 0.35);
+        display: none;
+        overflow: hidden;
+    }
+    .dashboard-header-graphic {
+        display: none;
+        background: #ffffff;
+        text-align: center;
+        padding: 16px 20px;
+    }
+    .dashboard-header-graphic.visible {
+        display: block;
+    }
+    .dashboard-header-graphic img {
+        max-width: 100%;
+        max-height: 160px;
+        width: auto;
+        height: auto;
+        object-fit: contain;
+        border-radius: 8px;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+        background: #ffffff;
+    }
+    .dashboard-header-body {
+        padding: 24px 30px 30px;
+        display: flex;
+        align-items: center;
+        gap: 18px;
+    }
+    .dashboard-header-badge {
+        display: none;
+        flex-shrink: 0;
+        width: 64px;
+        height: 64px;
+        border-radius: 12px;
+        overflow: hidden;
+        background: rgba(255, 255, 255, 0.15);
+        border: 2px solid rgba(255, 255, 255, 0.35);
+    }
+    .dashboard-header-badge.visible {
+        display: block;
+    }
+    .dashboard-header-badge img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+    }
+    .dashboard-header-text {
+        min-width: 0;
+        flex: 1;
+    }
+    .dashboard-header h1 {
+        margin: 0 0 10px 0;
+        font-size: 32px;
+    }
+    .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 20px;
+        margin-bottom: 30px;
+    }
+    .stat-card {
+        background: white;
+        padding: 25px;
+        border-radius: 12px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        text-align: center;
+    }
+    .stat-value {
+        font-size: 36px;
+        font-weight: bold;
+        color: #012b58;
+        margin: 10px 0;
+    }
+    .stat-label {
+        color: #64748b;
+        font-size: 14px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    .section {
+        background: white;
+        padding: 25px;
+        border-radius: 12px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        margin-bottom: 20px;
+    }
+    .section-title {
+        font-size: 20px;
+        font-weight: 600;
+        margin: 0 0 20px 0;
+        color: #1e293b;
+    }
+    .chart-bar {
+        display: flex;
+        align-items: center;
+        margin-bottom: 15px;
+    }
+    .chart-label {
+        width: 160px;
+        font-size: 14px;
+        color: #475569;
+        word-break: break-word;
+    }
+    .chart-bar-container {
+        flex: 1;
+        background: #f1f5f9;
+        height: 30px;
+        border-radius: 6px;
+        overflow: hidden;
+        margin: 0 15px;
+    }
+    .chart-bar-fill {
+        height: 100%;
+        background: linear-gradient(90deg, #012b58 0%, #019cff 100%);
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        padding-right: 10px;
+        color: white;
+        font-size: 12px;
+        font-weight: 600;
+        min-width: 0;
+    }
+    .chart-count {
+        width: 60px;
+        text-align: right;
+        font-weight: 600;
+        color: #012b58;
+    }
+    #dashboard-content { display: none; }
+    .subgroup-list { list-style: none; padding: 0; margin: 0; }
+    .subgroup-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 12px 15px;
+        background: #f8fafc;
+        margin-bottom: 8px;
+        border-radius: 6px;
+        border-left: 3px solid #019cff;
+    }
+    .subgroup-name { font-weight: 500; color: #1e293b; }
+    .subgroup-count {
+        background: #012b58;
+        color: white;
+        padding: 4px 12px;
+        border-radius: 12px;
+        font-size: 12px;
+        font-weight: 600;
+    }
+    .dash-tabs {
+        display: none;
+        gap: 8px;
+        margin-bottom: 20px;
+    }
+    .dash-tabs.visible { display: flex; }
+    .dash-tab {
+        border: 2px solid #e2e8f0;
+        background: white;
+        color: #475569;
+        padding: 10px 18px;
+        border-radius: 8px;
+        font-weight: 600;
+        cursor: pointer;
+    }
+    .dash-tab[data-tab="overview"].active {
+        border-color: #012b58;
+        background: linear-gradient(135deg, #012b58 0%, #019cff 100%);
+        color: white;
+    }
+    .dash-tab[data-tab="registration"].active {
+        border-color: #005c3b;
+        background: #005c3b;
+        color: #f5f4e8;
+    }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+
+    /* Registration tab color set: #005c3b / #f5f4e8 (accent #ff7941 on Export only) */
+    #tab-registration .section {
+        background: #f5f4e8;
+        border: 1px solid #d9d6c4;
+    }
+    #tab-registration .section-title {
+        color: #005c3b;
+    }
+    #tab-registration .reg-breadcrumb {
+        color: #5a6b5e;
+    }
+    #tab-registration .reg-breadcrumb a {
+        color: #005c3b;
+    }
+    #tab-registration .reg-question-card {
+        background: #fffef8;
+        border-color: #cfd9c8;
+    }
+    #tab-registration .reg-question-card:hover {
+        border-color: #005c3b;
+        box-shadow: 0 2px 10px rgba(0, 92, 59, 0.15);
+    }
+    #tab-registration .reg-question-title {
+        color: #005c3b;
+    }
+    #tab-registration .chart-bar-fill {
+        background: linear-gradient(90deg, #005c3b 0%, #1a8f5c 100%);
+    }
+    #tab-registration .chart-count {
+        color: #005c3b;
+    }
+    #tab-registration .clickable-option:hover .chart-label {
+        color: #005c3b;
+    }
+    #tab-registration .people-table a {
+        color: #005c3b;
+    }
+    #tab-registration .btn-export {
+        background: #ff7941;
+        color: #fff;
+    }
+    #tab-registration .btn-export:hover {
+        background: #e56a35;
+        color: #fff;
+    }
+    #tab-registration .btn-back {
+        background: #fffef8;
+        color: #005c3b;
+        border-color: #cfd9c8;
+    }
+    #tab-registration .empty-state {
+        background: #fffef8;
+        border-color: #cfd9c8;
+        color: #5a6b5e;
+    }
+    #tab-registration .info-banner {
+        background: #e8f5ef;
+        border-left-color: #005c3b;
+        color: #005c3b;
+    }
+    .reg-toolbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 16px;
+        flex-wrap: wrap;
+    }
+    .reg-breadcrumb {
+        font-size: 14px;
+        color: #64748b;
+        margin-bottom: 16px;
+    }
+    .reg-breadcrumb a {
+        color: #005c3b;
+        cursor: pointer;
+        text-decoration: none;
+        font-weight: 600;
+    }
+    .reg-question-card {
+        border: 1px solid #e2e8f0;
+        border-radius: 10px;
+        padding: 16px 18px;
+        margin-bottom: 12px;
+        cursor: pointer;
+        transition: box-shadow 0.15s ease, border-color 0.15s ease;
+        background: #fff;
+    }
+    .reg-question-card:hover {
+        border-color: #005c3b;
+        box-shadow: 0 2px 10px rgba(0, 92, 59, 0.15);
+    }
+    .reg-question-title {
+        font-weight: 600;
+        color: #1e293b;
+        margin: 0 0 8px 0;
+        font-size: 16px;
+    }
+    .reg-meta {
+        color: #64748b;
+        font-size: 13px;
+        margin-bottom: 10px;
+    }
+    .reg-preview {
+        color: #475569;
+        font-size: 13px;
+        font-style: italic;
+        margin-top: 6px;
+    }
+    .clickable-option {
+        cursor: pointer;
+    }
+    .clickable-option:hover .chart-label {
+        color: #005c3b;
+        text-decoration: underline;
+    }
+    .people-table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+    .people-table th, .people-table td {
+        text-align: left;
+        padding: 10px 12px;
+        border-bottom: 1px solid #e2e8f0;
+        vertical-align: top;
+    }
+    .people-table th {
+        color: #64748b;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+    }
+    .people-table a {
+        color: #005c3b;
+        font-weight: 600;
+        text-decoration: none;
+    }
+    .people-table a:hover { text-decoration: underline; }
+    .btn-export {
+        background: #ff7941;
+        color: #fff;
+        border: none;
+        border-radius: 8px;
+        padding: 10px 16px;
+        font-weight: 600;
+        cursor: pointer;
+    }
+    .btn-export:hover { background: #e56a35; color: #fff; }
+    .finance-stat-clickable {
+        cursor: pointer;
+        transition: box-shadow 0.15s ease, transform 0.15s ease;
+        border: 2px solid transparent;
+    }
+    .finance-stat-clickable:hover {
+        box-shadow: 0 4px 14px rgba(1, 43, 88, 0.15);
+        transform: translateY(-1px);
+    }
+    .finance-stat-clickable.active {
+        border-color: #012b58;
+        background: #eef6ff !important;
+    }
+    .finance-drill-hint {
+        font-size: 12px;
+        color: #64748b;
+        margin-top: 6px;
+    }
+    .finance-drill-title {
+        font-size: 16px;
+        font-weight: 600;
+        color: #1e293b;
+        margin: 0 0 12px 0;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+    }
+    .btn-back {
+        background: #f1f5f9;
+        color: #334155;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 8px 14px;
+        font-weight: 600;
+        cursor: pointer;
+    }
+    .empty-state {
+        background: #f8fafc;
+        border: 1px dashed #cbd5e1;
+        border-radius: 10px;
+        padding: 28px;
+        text-align: center;
+        color: #64748b;
+    }
+    .info-banner {
+        background: #eff6ff;
+        border-left: 4px solid #3b82f6;
+        padding: 16px 18px;
+        border-radius: 8px;
+        color: #1e3a8a;
+    }
+    .loading-overlay {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        background: rgba(15, 23, 42, 0.35);
+        align-items: center;
+        justify-content: center;
+    }
+    .loading-overlay.visible {
+        display: flex;
+    }
+    .loading-card {
+        background: #fff;
+        border-radius: 14px;
+        padding: 28px 36px;
+        box-shadow: 0 12px 40px rgba(15, 23, 42, 0.25);
+        text-align: center;
+        min-width: 220px;
+    }
+    .loading-spinner {
+        width: 48px;
+        height: 48px;
+        margin: 0 auto 16px;
+        border: 4px solid #e2e8f0;
+        border-top-color: #019cff;
+        border-radius: 50%;
+        animation: dash-spin 0.8s linear infinite;
+    }
+    .loading-overlay.reg-loading .loading-spinner {
+        border-top-color: #005c3b;
+    }
+    .loading-text {
+        color: #1e293b;
+        font-size: 15px;
+        font-weight: 600;
+        margin: 0;
+    }
+    .loading-subtext {
+        color: #64748b;
+        font-size: 13px;
+        margin: 8px 0 0;
+    }
+    .btn-cancel-loading {
+        margin-top: 16px;
+        background: #f1f5f9;
+        color: #334155;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        padding: 8px 16px;
+        font-weight: 600;
+        cursor: pointer;
+    }
+    .btn-cancel-loading:hover {
+        background: #e2e8f0;
+    }
+    @keyframes dash-spin {
+        to { transform: rotate(360deg); }
+    }
+</style>
+
+<div class="dashboard-container">
+    <div class="loading-overlay" id="loading-overlay" aria-live="polite" aria-busy="false">
+        <div class="loading-card">
+            <div class="loading-spinner"></div>
+            <p class="loading-text" id="loading-text">Loading...</p>
+            <p class="loading-subtext">This may take a minute to go to space and back. 🚀<>
+            <button type="button" class="btn-cancel-loading" id="btn-cancel-loading">Cancel</button>
+        </div>
+    </div>
+
+    <div class="selector-card" id="selector-card">
+        <h2><i class="fa fa-search"></i> Find Involvement</h2>
+        <div id="selector-content">
+            <div class="search-wrap">
+                <div class="search-row">
+                    <input type="text" id="org-search" placeholder="Type an involvement name..." autocomplete="off" />
+                    <button type="button" class="btn-search" id="btn-search-org">
+                        <i class="fa fa-search"></i> Search
+                    </button>
+                </div>
+                <div class="search-results" id="search-results"></div>
+            </div>
+            <div class="search-hint">Enter at least 2 characters, then click Search (or press Enter). Click a result to open the dashboard.</div>
+        </div>
+    </div>
+
+    <div id="dashboard-content">
+        <div class="dashboard-header" id="dashboard-header">
+            <div class="dashboard-header-graphic" id="header-graphic">
+                <img id="org-graphic" alt="Involvement title graphic" />
+            </div>
+            <div class="dashboard-header-body">
+                <div class="dashboard-header-badge" id="header-badge">
+                    <img id="org-badge" alt="Channel logo" />
+                </div>
+                <div class="dashboard-header-text">
+                    <h1 id="org-name"></h1>
+                    <p id="org-info" style="margin: 0; opacity: 0.9;"></p>
+                </div>
+            </div>
+        </div>
+
+        <div class="dash-tabs" id="dash-tabs">
+            <button type="button" class="dash-tab active" data-tab="overview">Overview</button>
+            <button type="button" class="dash-tab" data-tab="registration">Registration</button>
+        </div>
+
+        <div class="tab-panel active" id="tab-overview">
+            <div class="stats-grid" id="stats-grid"></div>
+            <div class="section" id="age-section" style="display:none;">
+                <h2 class="section-title" id="distribution-title"><i class="fa fa-chart-bar"></i> Age Distribution</h2>
+                <div id="age-chart"></div>
+            </div>
+            <div class="section" id="grade-section" style="display:none;">
+                <h2 class="section-title"><i class="fa fa-graduation-cap"></i> Grade Distribution</h2>
+                <div id="grade-chart"></div>
+            </div>
+            <div class="section" id="marital-section" style="display:none;">
+                <h2 class="section-title"><i class="fa fa-heart"></i> Marital Status</h2>
+                <div id="marital-chart"></div>
+            </div>
+            <div class="section" id="timeline-section" style="display:none;">
+                <h2 class="section-title"><i class="fa fa-calendar-plus"></i> Enrollment Timeline (Last 12 Months)</h2>
+                <div id="timeline-chart"></div>
+            </div>
+            <div class="section" id="transaction-section" style="display:none;">
+                <h2 class="section-title"><i class="fa fa-dollar"></i> Financial Transactions</h2>
+                <div id="transaction-summary"></div>
+                <div id="finance-drilldown" style="display:none; margin-top: 18px;"></div>
+            </div>
+            <div class="section" id="subgroup-section" style="display:none;">
+                <h2 class="section-title"><i class="fa fa-layer-group"></i> Subgroups</h2>
+                <div id="subgroup-list"></div>
+            </div>
+        </div>
+
+        <div class="tab-panel" id="tab-registration">
+            <div class="section">
+                <div class="reg-toolbar">
+                    <h2 class="section-title" style="margin:0;"><i class="fa fa-clipboard-list"></i> Registration Questions</h2>
+                    <div>
+                        <button type="button" class="btn-export" id="btn-export-reg" style="display:none;">
+                            <i class="fa fa-download"></i> Export Excel
+                        </button>
+                    </div>
+                </div>
+                <div class="reg-breadcrumb" id="reg-breadcrumb"></div>
+                <div id="reg-view"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+(function() {
+    function initDashboard() {
+        var scriptUrl = window.location.pathname;
+        var currentOrgId = null;
+        var regState = { view: 'summary', question: null, option: null, person: null, summary: null };
+        var currentXhr = null;
+        var loadGeneration = 0;
+
+        function esc(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
+        function personLink(peopleId, name) {
+            return '<a href="/Person2/' + encodeURIComponent(peopleId) + '" target="_blank" rel="noopener">' + esc(name) + '</a>';
+        }
+
+        function showLoading(message, isReg) {
+            $('#loading-text').text(message || 'Loading...');
+            $('#loading-overlay')
+                .toggleClass('reg-loading', !!isReg)
+                .attr('aria-busy', 'true')
+                .addClass('visible');
+        }
+
+        function hideLoading() {
+            $('#loading-overlay')
+                .attr('aria-busy', 'false')
+                .removeClass('visible reg-loading');
+        }
+
+        function cancelLoading() {
+            loadGeneration += 1;
+            if (currentXhr && typeof currentXhr.abort === 'function') {
+                try { currentXhr.abort(); } catch (e) {}
+            }
+            currentXhr = null;
+            hideLoading();
+            $('#finance-drilldown').filter(':visible').html(
+                '<div class="empty-state">Request cancelled.</div>'
+            );
+            $('.finance-stat-clickable').removeClass('active');
+        }
+
+        $('#btn-cancel-loading').on('click', function() {
+            cancelLoading();
+        });
+
+        function ajaxPost(data, success, options) {
+            options = options || {};
+            var gen = loadGeneration;
+            currentXhr = $.ajax({
+                url: scriptUrl,
+                type: 'POST',
+                data: $.extend({ ajax: 'true' }, data),
+                success: function(response) {
+                    if (gen !== loadGeneration) return;
+                    var parsed = typeof response === 'string' ? JSON.parse(response) : response;
+                    success(parsed);
+                },
+                error: function(xhr, textStatus) {
+                    if (textStatus === 'abort' || gen !== loadGeneration) return;
+                    alert('Request failed: ' + (xhr.statusText || 'error'));
+                },
+                complete: function(xhr) {
+                    if (currentXhr === xhr) {
+                        currentXhr = null;
+                    }
+                    if (options.hideLoadingOnComplete !== false && options.showLoading) {
+                        if (gen === loadGeneration) {
+                            hideLoading();
+                        }
+                    }
+                    if (typeof options.complete === 'function') {
+                        options.complete();
+                    }
+                }
+            });
+            return currentXhr;
+        }
+
+        $(document).on('click', '#toggle-selector', function() {
+            $('#selector-content').slideToggle();
+        });
+
+        $(document).on('click', '.dash-tab', function() {
+            var tab = $(this).data('tab');
+            $('.dash-tab').removeClass('active');
+            $(this).addClass('active');
+            $('.tab-panel').removeClass('active');
+            $('#tab-' + tab).addClass('active');
+            if (tab === 'registration' && currentOrgId) {
+                loadRegistrationSummary();
+            }
+        });
+
+        var searchTimer = null;
+        var searchReq = 0;
+
+        function hideSearchResults() {
+            $('#search-results').removeClass('visible').empty();
+        }
+
+        function renderSearchResults(items) {
+            var $box = $('#search-results');
+            if (!items || !items.length) {
+                $box.html('<div class="search-empty">No matching involvements found.</div>').addClass('visible');
+                return;
+            }
+            var html = '';
+            items.forEach(function(org) {
+                var meta = [];
+                if (org.program) meta.push(org.program);
+                if (org.division) meta.push(org.division);
+                meta.push('ID ' + org.id);
+                html += '<div class="search-result-item" data-org-id="' + org.id + '">';
+                html += '<div class="search-result-name">' + esc(org.name) + '</div>';
+                html += '<div class="search-result-meta">' + esc(meta.join(' · ')) + '</div>';
+                html += '</div>';
+            });
+            $box.html(html).addClass('visible');
+        }
+
+        function runOrgSearch(immediate) {
+            var term = $.trim($('#org-search').val() || '');
+            clearTimeout(searchTimer);
+            if (term.length < 2) {
+                hideSearchResults();
+                if (immediate) {
+                   $('#search-results').html('<div class="search-empty">Enter at least 2 characters to search.</div>').addClass('visible');
+                }
+                return;
+            }
+            var doSearch = function() {
+                var reqId = ++searchReq;
+                $('#btn-search-org').prop('disabled', true);
+                ajaxPost({ action: 'search_involvements', term: term }, function(data) {
+                    if (reqId !== searchReq) return;
+                    if (data && data.error) {
+                        $('#search-results').html('<div class="search-empty">Error: ' + esc(data.error) + '</div>').addClass('visible');
+                        return;
+                    }
+                    renderSearchResults(data || []);
+                }, {
+                    complete: function() {
+                        $('#btn-search-org').prop('disabled', false);
+                    }
+                });
+            };
+            if (immediate) {
+                doSearch();
+            } else {
+                searchTimer = setTimeout(doSearch, 250);
+            }
+        }
+
+        $('#org-search').on('input', function() {
+            runOrgSearch(false);
+        });
+
+        $('#btn-search-org').on('click', function() {
+            runOrgSearch(true);
+        });
+
+        $('#org-search').on('keydown', function(e) {
+            if (e.keyCode === 27) {
+                hideSearchResults();
+            } else if (e.keyCode === 13) {
+                e.preventDefault();
+                runOrgSearch(true);
+            }
+        });
+
+        $(document).on('click', '.search-result-item', function() {
+            var orgId = $(this).attr('data-org-id');
+            var name = $(this).find('.search-result-name').text();
+            hideSearchResults();
+            $('#org-search').val(name);
+            currentOrgId = orgId;
+            loadOverviewDashboard(orgId);
+        });
+
+        $(document).on('click', function(e) {
+            if (!$(e.target).closest('.search-wrap').length) {
+                hideSearchResults();
+            }
+        });
+
+        $(document).on('click', '.finance-stat-clickable', function() {
+            var status = String($(this).data('finance-status') || '');
+            if (!currentOrgId || !status) return;
+            $('.finance-stat-clickable').removeClass('active');
+            $(this).addClass('active');
+            showLoading('Loading people...', false);
+            $('#finance-drilldown').show().html('<div class="empty-state">Loading people...</div>');
+            ajaxPost({
+                action: 'get_finance_people',
+                org_id: currentOrgId,
+                status: status
+            }, function(data) {
+                if (data.error) {
+                    $('#finance-drilldown').html('<div class="info-banner">' + esc(data.error) + '</div>');
+                    return;
+                }
+                var money = function(n) {
+                    return '$' + (n || 0).toFixed(2).replace(/\d(?=(\d{3})+\.)/g, '$&,');
+                };
+                var html = '<div class="finance-drill-title">';
+                html += '<span>' + esc(data.label) + ' — ' + (data.count || 0) + ' people</span>';
+                html += '<button type="button" class="btn-back" id="btn-close-finance-drill">Close</button>';
+                html += '</div>';
+                if (!data.people || !data.ople.length) {
+                    html += '<div class="empty-state">No people found for this category.</div>';
+                } else {
+                    html += '<table class="people-table"><thead><tr><th>Person</th><th>Paid</th><th>Balance Due</th></tr></thead><tbody>';
+                    data.people.forEach(function(p) {
+                        html += '<tr><td>';
+                        if (p.people_id) {
+                            html += personLink(p.people_id, p.name);
+                        } else {
+                            html += esc(p.name);
+                        }
+                        html += '</td><td>' + money(p.total_paid) + '</td>';
+                        html += '<td>' + money(p.balance_due) + '</td></tr>';
+                    });
+                    html += '</tbody></table>';
+                }
+                $('#finance-drilldown').html(html).show();
+            }, { showLoading: true });
+        });
+
+        $(document).on('click', '#btn-close-finance-drill', function() {
+            $('#finance-drilldown').hide().empty();
+            $('.finance-stat-clickable').removeClass('active');
+        });
+
+        function loadOverviewDashboard(orgId) {
+            showLoading('Loading involvement dashboard...', false);
+            ajaxPost({ action: 'get_dashboard', org_id: orgId }, function(data) {
+                if (data.error) {
+                    alert('Error: ' + data.error + (data.traceback ? '\n\n' + data.traceback : ''));
+                    return;
+                }
+
+                $('#org-name').text(data.org_name);
+                $('#org-info').text(data.program_name + ' - ' + data.division_name);
+
+                // Mobile/Sites title graphic (Photo / Sites hero) + optional channel logo
+                if (data.title_graphic_url) {
+                    $('#org-graphic')
+                        .attr('src', data.title_graphic_url)
+                        .attr('alt', (data.org_name || 'Involvement') + ' title graphic')
+                        .off('error').on('error', function() {
+                            $('#header-graphic').removeClass('visible');
+                        });
+                    $('#header-graphic').addClass('visible');
+                } else {
+                    $('#org-graphic').removeAttr('src');
+                    $('#header-graphic').removeClass('visible');
+                }
+                if (data.badge_url) {
+                    $('#org-badge')
+                        .attr('src', data.badge_url)
+                        .attr('alt', (data.org_name || 'Involvement') + ' logo')
+                        .off('error').on('error', function() {
+                            $('#header-badge').removeClass('visible');
+                        });
+                    $('#header-badge').addClass('visible');
+                } else {
+                    $('#org-badge').removeAttr('src');
+                    $('#header-badge').removeClass('visible');
+                }
+
+                $('#dashboard-header').show();
+                $('#dash-tabs').addClass('visible');
+
+                $('#selector-content').slideUp();
+                $('#selector-card h2').html('<i class="fa fa-search"></i> Find Involvement <span id="toggle-selector" style="float:right; cursor:pointer;"><i class="fa fa-chevron-down"></i></span>');
+
+                // Reset to Overview tab
+                $('.dash-tab').removeClass('active');
+                $('.dash-tab[data-tab="overview"]').addClass('active');
+                $('.tab-panel').removeClass('active');
+                $('#tab-overview').addClass('active');
+
+                var statsHtml = '';
+                statsHtml += '<div class="stat-card"><div class="stat-label">Total Members</div><div class="stat-value">' + data.total_members + '</div></div>';
+                statsHtml += '<div class="stat-card"><div class="stat-label">Male</div><div class="stat-value">' + data.male_count + '</div></div>';
+                statsHtml += '<div class="stat-card"><div class="stat-label">Female</div><div class="stat-value">' + data.female_count + '</div></div>';
+                $('#stats-grid').html(statsHtml);
+
+                var profile = data.overview_profile || {};
+                $('#age-section').hide();
+                $('#grade-section').hide();
+                $('#marital-section').hide();
+                $('#timeline-section').hide();
+
+                if (profile.show_age && data.age_groups) {
+                    var ageHtml = '';
+                    var ageOrder = ['0-12', '13-17', '18-25', '26-35', '36-50', '51-65', '66+', 'Unknown'];
+                    var maxAge = Math.max.apply(null, Object.values(data.age_groups).concat([0]));
+                    ageOrder.forEach(function(ageGroup) {
+                        if (data.age_groups[ageGroup] && data.age_groups[ageGroup] > 0) {
+                            var count = data.age_groups[ageGroup];
+                            var pct = maxAge > 0 ? Math.round((count / maxAge) * 100) : 0;
+                            var totalPct = data.total_members > 0 ? Math.round((count / data.total_members) * 100) : 0;
+                            ageHtml += '<div class="chart-bar">';
+                            ageHtml += '<div class="chart-label">' + esc(ageGroup) + '</div>';
+                            ageHtml += '<div class="chart-bar-container"><div class="chart-bar-fill" style="width:' + pct + '%;">' + totalPct + '%</div></div>';
+                            ageHtml += '<div class="chart-count">' + count + '</div></div>';
+                        }
+                    });
+                    $('#distribution-title').html('<i class="fa fa-chart-bar"></i> Age Distribution');
+                    $('#age-chart').html(ageHtml);
+                    $('#age-section').show();
+                }
+
+                if (profile.show_grade && data.grades && data.grades.length) {
+                    var gradeHtml = '';
+                    var maxGrade = 0;
+                    data.grades.forEach(function(g) { if (g.count > maxGrade) maxGrade = g.count; });
+                    data.grades.forEach(function(g) {
+                        if (!g.count) return;
+                        var pct = maxGrade > 0 ? Math.round((g.count / maxGrade) * 100) : 0;
+                        var totalPct = data.total_members > 0 ? Math.round((g.count / data.total_members) * 100) : 0;
+                        gradeHtml += '<div class="chart-bar">';
+                        gradeHtml += '<div class="chart-label">' + esc(g.label) + '</div>';
+                        gradeHtml += '<div class="chart-bar-container"><div class="chart-bar-fill" style="width:' + pct + '%;">' + totalPct + '%</div></div>';
+                        gradeHtml += '<div class="chart-count">' + g.count + '</div></div>';
+                    });
+                    $('#grade-chart').html(gradeHtml);
+                    $('#grade-section').show();
+                }
+
+                if (profile.show_marital && data.marital_status && Object.keys(data.marital_status).length > 0) {
+                    var maritalHtml = '';
+                    var maxMarital = Math.max.apply(null, Object.values(data.marital_status));
+                    for (var status in data.marital_status) {
+                        var count = data.marital_status[status];
+                        var pct = maxMarital > 0 ? Math.round((count / maxMarital) * 100) : 0;
+                        var totalPct = data.total_members > 0 ? Math.round((count / data.total_members) * 100) : 0;
+                        maritalHtml += '<div class="chart-bar"><div class="chart-label">' + esc(status) + '</div>';
+                        maritalHtml += '<div class="chart-bar-container"><div class="chart-bar-fill" style="width:' + pct + '%;">' + totalPct + '%</div></div>';
+                        maritalHtml += '<div class="chart-count">' + count + '</div></div>';
+                    }
+                    $('#marital-chart').html(maritalHtml);
+                    $('#marital-section').show();
+                }
+
+                if (data.transactions && data.transactions.total > 0) {
+                    var money = function(n) {
+                        return '$' + (n || 0).toFixed(2).replace(/\d(?=(\d{3})+\.)/g, '$&,');
+                    };
+                    var transHtml = '<div class="row" style="margin-bottom: 15px;">';
+                    transHtml += '<div class="col-md-4"><div style="background:#f8f9fa;padding:15px;border-radius:8px;text-align:center;">';
+                    transHtml += '<div style="font-size:24px;font-weight:bold;color:#012b58;">' + data.transactions.total + '</div>';
+                    transHtml += '<div style="font-size:12px;color:#666;">Payments (Amt &gt; 0)</div></div></div>';
+                    transHtml += '<div class="col-md-4"><div style="background:#f8f9fa;padding:15px;border-radius:8px;text-align:center;">';
+                    transHtml += '<div style="font-size:24px;font-weight:bold;color:#27ae60;">' + money(data.transactions.total_paid) + '</div>';
+                    transHtml += '<div style="font-size:12px;color:#666;">Total Paid</div></div></div>';
+                    transHtml += '<div class="col-md-4"><div style="background:#f8f9fa;padding:15px;border-radius:8px;text-align:center;">';
+                    transHtml += '<div style="font-size:24px;font-weight:bold;color:#e74c3c;">' + money(data.transactions.total_due) + '</div>';
+                    transHtml += '<div style="font-size:12px;color:#666;">Total Due</div></div></div></div>';
+                    transHtml += '<div class="row">';
+                    transHtml += '<div class="col-md-6"><div class="finance-stat-clickable" data-finance-status="paid_in_full" style="background:#f8f9fa;padding:15px;border-radius:8px;text-align:center;">';
+                    transHtml += '<div style="font-size:20px;font-weight:bold;color:#27ae60;">' + data.transactions.paid_in_full + '</div>';
+                    transHtml += '<div style="font-size:12px;color:#666;">Paid in Full</div>';
+                    transHtml += '<div class="finance-drill-hint">Click to view people</div></div></div>';
+                    transHtml += '<div class="col-md-6"><div class="finance-stat-clickable" data-finance-status="remaining_balance" style="background:#f8f9fa;padding:15px;border-radius:8px;text-align:center;">';
+                    transHtml += '<div style="font-size:20px;font-weight:bold;color:#f39c12;">' + data.transactions.remaining_balance + '</div>';
+                    transHtml += '<div style="font-size:12px;color:#666;">Remaining Balance</div>';
+                    transHtml += '<div class="finance-drill-hint">Click to view people</div></div></div></div>';
+                    $('#transaction-summary').html(transHtml);
+                    $('#finance-drilldown').hide().empty();
+                    $('#transaction-section').show();
+                } else {
+                    $('#transaction-section').hide();
+                    $('#finance-drilldown').hide().empty();
+                }
+
+                if (profile.show_enrollment_timeline && data.enrollment_timeline && Object.keys(data.enrollment_timeline).length > 0) {
+                    var timelineHtml = '';
+                    var maxTimeline = Math.max.apply(null, Object.values(data.enrollment_timeline));
+                    var monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+                    for (var month in data.enrollment_timeline) {
+                        var count = data.enrollment_timeline[month];
+                        var pct = maxTimeline > 0 ? Math.round((count / maxTimeline) * 100) : 0;
+                        var parts = month.split('-');
+                        var monthLabel = monthNames[parseInt(parts[1], 10) - 1] + ' ' + parts[0];
+                        timelineHtml += '<div class="chart-bar"><div class="chart-label">' + esc(monthLabel) + '</div>';
+                        timelineHtml += '<div class="chart-bar-container"><div class="chart-bar-fill" style="width:' + pct + '%;"></div></div>';
+                        timelineHtml += '<div class="chart-count">' + count + '</div></div>';
+                    }
+                    $('#timeline-chart').html(timelineHtml);
+                    $('#timeline-section').show();
+                } else {
+                    $('#timeline-section').hide();
+                }
+
+                if (data.subgroups && data.subgroups.length > 0) {
+                    var subgroupHtml = '<ul class="subgroup-list">';
+                    data.subgroups.forEach(function(subgroup) {
+                        subgroupHtml += '<li class="subgroup-item"><span class="subgroup-name">' + esc(subgroup.name) + '</span>';
+                        subgroupHtml += '<span class="subgroup-count">' + subgroup.count + '</span></li>';
+                    });
+                    subgroupHtml += '</ul>';
+                    $('#subgroup-list').html(subgroupHtml);
+                    $('#subgroup-section').show();
+                } else {
+                    $('#subgroup-section').hide();
+                }
+
+                regState = { view: 'summary', question: null, option: null, person: null, summary: null };
+                $('#reg-view').html('<div class="empty-state">Open the Registration tab to load question summaries.</div>');
+                $('#btn-export-reg').hide();
+
+                $('#dashboard-content').fadeIn();
+            }, { showLoading: true });
+        }
+
+        function renderBreadcrumb() {
+            var parts = ['<a data-nav="summary">Overview</a>'];
+            if (regState.question) {
+                parts.push('<a data-nav="question">' + esc(regState.question.label) + '</a>');
+            }
+            if (regState.option) {
+                parts.push('<a data-nav="option">' + esc(regState.option.text) + '</a>');
+            }
+            if (regState.person) {
+                parts.push('<span>' + esc(regState.person.name) + '</span>');
+            }
+            $('#reg-breadcrumb').html(parts.join(' <i class="fa fa-chevron-right"></i> '));
+        }
+
+        function loadRegistrationSummary() {
+            if (!currentOrgId) return;
+            showLoading('Loading registration questions...', true);
+            $('#reg-view').html('<div class="empty-state">Loading registration questions...</div>');
+            ajaxPost({ action: 'get_registration_summary', org_id: currentOrgId }, function(data) {
+                if (data.error) {
+                    $('#reg-view').html('<div class="info-banner">Error: ' + esc(data.error) + '</div>');
+                    $('#btn-export-reg').hide();
+                    return;
+                }
+                regState.summary = data;
+                regState.view = 'summary';
+                regState.question = null;
+                regState.option = null;
+                regState.person = null;
+                renderRegistrationSummary(data);
+            }, { showLoading: true });
+        }
+
+        function renderRegistrationSummary(data) {
+            renderBreadcrumb();
+            if (!data.is_registration_form) {
+                $('#btn-export-reg').hide();
+                $('#reg-view').html('<div class="info-banner">' + esc(data.message) + '</div>');
+                return;
+            }
+
+            if (!data.questions || data.questions.length === 0) {
+                $('#btn-export-reg').hide();
+                $('#reg-view').html('<div class="empty-state">' + esc(data.message || 'No registration questions found.') + '</div>');
+                return;
+            }
+
+            $('#btn-export-reg').show();
+            var html = '<div class="reg-meta" style="margin-bottom:14px;">Completed registrants: <strong>' + data.completed_count + '</strong></div>';
+
+            if (data.message) {
+                html += '<div class="empty-state" style="margin-bottom:14px;">' + esc(data.message) + '</div>';
+            }
+
+            data.questions.forEach(function(q) {
+                html += '<div class="reg-question-card" data-qid="' + esc(q.id) + '">';
+                html += '<div class="reg-question-title">' + esc(q.label) + '</div>';
+                if (q.kind === 'choice') {
+                    html += '<div class="reg-meta">' + q.answered + ' answered / ' + q.blank + ' blank</div>';
+                    var maxC = 0;
+                    (q.options || []).forEach(function(o) { if (o.count > maxC) maxC = o.count; });
+                    (q.options || []).forEach(function(o) {
+                        if (!o.count) return;
+                        var barPct = maxC > 0 ? Math.round((o.count / maxC) * 100) : 0;
+                        html += '<div class="chart-bar"><div class="chart-label">' + esc(o.text) + '</div>';
+                        html += '<div class="chart-bar-container"><div class="chart-bar-fill" style="width:' + barPct + '%;">' + o.pct + '%</div></div>';
+                        html += '<div class="chart-count">' + o.count + '</div></div>';
+                    });
+                } else {
+                    html += '<div class="reg-meta">' + q.answered + ' answered / ' + q.blank + ' blank</div>';
+                    if (q.preview && q.preview.length) {
+                        html += '<div class="reg-preview">' + esc(q.preview.join(' · ')) + '</div>';
+                    }
+                }
+                html += '</div>';
+            });
+            $('#reg-view').html(html);
+        }
+
+        function findQuestion(qid) {
+            if (!regState.summary || !regState.summary.questions) return null;
+            for (var i = 0; i < regState.summary.questions.length; i++) {
+                if (regStae.summary.questions[i].id === qid) return regState.summary.questions[i];
+            }
+            return null;
+        }
+
+        $(document).on('click', '.reg-question-card', function() {
+            var qid = $(this).data('qid');
+            var q = findQuestion(String(qid));
+            if (!q) return;
+            openQuestion(q);
+        });
+
+        function openQuestion(q) {
+            regState.view = 'question';
+            regState.question = q;
+            regState.option = null;
+            regState.person = null;
+            renderBreadcrumb();
+
+            if (q.kind === 'choice') {
+                var html = '<button type="button" class="btn-back" data-nav="summary"><i class="fa fa-arrow-left"></i> Back</button>';
+                html += '<h3 style="margin:16px 0 8px;">' + esc(q.label) + '</h3>';
+                html += '<div class="reg-meta">' + q.answered + ' answered / ' + q.blank + ' blank — click an option to see who selected it</div>';
+                var maxC = 0;
+                (q.options || []).forEach(functioo) { if (o.count > maxC) maxC = o.count; });
+                (q.options || []).forEach(function(o) {
+                    var barPct = maxC > 0 ? Math.round((o.count / maxC) * 100) : 0;
+                    html += '<div class="chart-bar clickable-option" data-ovalue="' + encodeURIComponent(o.value) + '" data-otext="' + encodeURIComponent(o.text) + '">';
+                    html += '<div class="chart-label">' + esc(o.text) + '</div>';
+                    html += '<div class="chart-bar-container"><div class="chart-bar-fill" style="width:' + barPct + '%;">' + o.pct + '%</div></div>';
+                    html += '<div class="chart-count">' + o.count + '</div></div>';
+                });
+                $('#reg-view').html(html);
+            } else {
+                showLoading('Loading answers...', true);
+                $('#reg-view').html('<div class="empty-state">Loading answers...</div>');
+                ajaxPost({ action: 'get_text_answers', org_id: currentOrgId, question_id: q.id }, function(data) {
+                    if (data.error) {
+                        $('#reg-view').html('<div class="info-banner">' + esc(data.error) + '</div>');
+                        return;
+                    }
+                    renderTextAnswers(q, data);
+                }, { showLoading: true });
+            }
+        }
+
+        function renderTextAnswers(q, data) {
+            var html = '<button type="button" class="btn-back" data-nav="summary"><i class="fa fa-arrow-left"></i> Back</button>';
+            html += '<h3 style="margin:16px 0 8px;">' + esc(q.label) + '</h3>';
+            html += '<div class="reg-meta">' + (data.answered_people || []).length + ' answered / ' + (data.blank_people || []).length + ' blank</div>';
+            html += '<table class="people-table"><thead><tr><th>Person</th><th>Answer</th></tr></thead><tbody>';
+            (data.answered_people || []).forEach(function(p) {
+                html += '<tr><td>' + personLink(p.people_id, p.name);
+                html += ' <a href="#" class="person-drill" data-pid="' + p.people_id + '" data-pname="' + encodeURIComponent(p.name) + '" title="Full Q&A">Q&A</a></td>';
+                html += '<td>' + esc(p.answer) + '</td></tr>';
+            });
+            html += '</tbody></table>';
+            if (data.blank_people && data.blank_people.length) {
+                html += '<h4 style="margin-top:20px;">Blank</h4><ul>';
+                data.blank_people.forEach(function(p) {
+                    html += '<li>' + personLink(p.people_id, p.name) + '</li>';
+                });
+                html += '</ul>';
+            }
+            $('#reg-view').html(html);
+        }
+
+        $(document).on('click', '.clickable-option', function() {
+            var ovalue = decodeURIComponent(String($(this).attr('data-ovalue') || ''));
+            var otext = decodeURIComponent(String($(this).attr('data-otext') || ''));
+            if (!regState.question) return;
+            loadOptionPeople({ value: ovalue, text: otext });
+        });
+
+        $(document).on('click', '.person-drill', function(e) {
+            e.preventDefault();
+            var pid = parseInt($(this).attr('data-pid'), 10);
+            var pname = decodeURIComponent(String($(this).attr('data-pname') || ''));
+            openPerson(pid, pname);
+        });
+
+        function openPerson(peopleId, name) {
+            regState.view = 'person';
+            regState.person = { people_id: peopleId, name: name };
+            renderBreadcrumb();
+            showLoading('Loading full Q&A...', true);
+            $('#reg-view').html('<div class="empty-state">Loading full Q&A...</div>');
+            ajaxPost({ action: 'get_person_answers', org_id: currentOrgId, people_id: peopleId }, function(data) {
+                if (data.error) {
+                    $('#reg-view').html('<div class="info-banner">' + esc(data.error) + '</div>');
+                    return;
+                }
+                var backNav = regState.option ? 'option' : (regState.question ? 'question' : 'summary');
+                var html = '<button type="button" class="btn-back" data-nav="' + backNav + '"><i class="fa fa-arrow-left"></i> Back</button>';
+                html += '<h3 style="margin:16px 0 8px;">' + personLink(data.people_id, data.name) + '</h3>';
+                html += '<table class="people-table"><thead><tr><th>Question</th><th>Answer</th></tr></thead><tbody>';
+                (data.answers || []).forEach(function(a) {
+                    html += '<tr><td>' + esc(a.label) + '</td><td>' + (a.blank ? '<em class="text-muted">Blank</em>' : esc(a.answer)) + '</td></tr>';
+                });
+                html += '</tbody></table>';
+                $('#reg-view').html(html);
+            }, { showLoading: true });
+        }
+
+        function loadOptionPeople(o) {
+            regState.option = o;
+            regState.person = null;
+            regState.view = 'option';
+            renderBreadcrumb();
+            showLoading('Loading people...', true);
+            $('#reg-view').html('<div class="empty-state">Loading people...</div>');
+            ajaxPost({
+                action: 'get_option_people',
+                org_id: currentOrgId,
+                question_id: regState.question.id,
+                option_value: o.value
+            }, function(data) {
+                if (data.error) {
+                    $('#reg-view').html('<div class="info-banner">' + esc(data.error) + '</div>');
+                    return;
+                }
+                var html = '<button type="button" class="btn-back" data-nav="question"><i class="fa fa-arrow-left"></i> Back</button>';
+                html += '<h3 style="margin:16px 0 8px;">' + esc(regState.question.label) + ' — ' + esc(o.text) + '</h3>';
+                html += 'iv class="reg-meta">' + (data.people || []).length + ' people</div>';
+                html += '<table class="people-table"><thead><tr><th>Person</th><th>Answer</th></tr></thead><tbody>';
+                (data.people || []).forEach(function(p) {
+                    html += '<tr><td>' + personLink(p.people_id, p.name);
+                    html += ' <a href="#" class="person-drill" data-pid="' + p.people_id + '" data-pname="' + encodeURIComponent(p.name) + '">Q&A</a></td>';
+                    html += '<td>' + esc(p.answer) + '</td></tr>';
+                });
+                html += '</tbody></table>';
+                $('#reg-view').html(html);
+            }, { showLoading: true });
+        }
+
+        $(document).on('click', '[data-nav]', function(e) {
+            e.preventDefault();
+            var nav = $(this).data('nav');
+            if (nav === 'summary') {
+                if (regState.summary) renderRegistrationSummary(regState.summary);
+                else loadRegistrationSummary();
+            } else if (nav === 'question' && regState.question) {
+                openQuestion(regState.question);
+            } else if (nav === 'option' && regState.question && regState.option) {
+                loadOptionPeople(regState.option);
+            }
+        });
+
+        $('#btn-export-reg').click(function() {
+            if (!currentOrgId) return;
+            showLoading('Preparing Excel export...', true);
+            ajaxPost({ action: 'export_registration', org_id: currentOrgId }, function(data) {
+                if (data.error) {
+                    alert(data.error);
+                    return;
+                }
+                var lines = ['PeopleId,Name,Question,Answer'];
+                (data.rows || []).forEach(function(r) {
+                    lines.push([
+                        csvCell(r.people_id),
+                        csvCell(r.name),
+                        csvCell(r.question),
+                        csvCell(r.answer)
+                    ].join(','));
+                });
+                var blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+                var url = URL.createObjectURL(blob);
+                var a = document.createElement('a');
+                a.href = url;
+                a.download = data.filename || 'registration-answers.csv';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            }, { showLoading: true });
+        });
+
+        function csvCell(v) {
+            var s = String(v == null ? '' : v);
+            if (/[",\n\r]/.test(s)) {
+                return '"' + s.replace(/"/g, '""') + '"';
+            }
+            return s;
+        }
+    }
+
+    if (window.jQuery) {
+        $(document).ready(initDashboard);
+    } else {
+        var checkJQuery = setInterval(function() {
+            if (window.jQuery) {
+                clearInterval(checkJQuery);
+                $(document).ready(initDashboard);
+            }
+        }, 50);
+    }
+})();
+</script>
+'''
