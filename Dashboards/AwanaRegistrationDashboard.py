@@ -2708,7 +2708,8 @@ SELECT
     ISNULL(rr.mname, '') AS MotherName,
     ISNULL(rr.fname, '') AS FatherName,
     ISNULL(rr.emcontact, '') AS EmContact,
-    ISNULL(rr.emphone, '') AS EmPhone
+    ISNULL(rr.emphone, '') AS EmPhone,
+    om.EnrollmentDate AS JoinDate
 """ + staff_select + """
 FROM OrganizationMembers om
 INNER JOIN People pe ON pe.PeopleId = om.PeopleId
@@ -2785,6 +2786,9 @@ ORDER BY PersonName
             'has_allergy': _allergy_text_meaningful(allergy),
             'emergency': emergency,
             'parents': _join_labels([mother, father], ' / '),
+            'join_date': _fmt_date(r.JoinDate) if hasattr(r, 'JoinDate') else '',
+            'join_iso': _fmt_iso(
+                r.JoinDate if hasattr(r, 'JoinDate') else None, ''),
         }
         if include_staff:
             bg_date = _fmt_date(r.BgDate) if hasattr(r, 'BgDate') else ''
@@ -7101,6 +7105,8 @@ else:
             if (key === 'handbook') return s(a.handbook_iso || a.handbook_date).localeCompare(
                 s(b.handbook_iso || b.handbook_date));
             if (key === 'allergy') return s(a.allergy).localeCompare(s(b.allergy));
+            if (key === 'join' || key === 'join_date') return s(a.join_iso || a.join_date).localeCompare(
+                s(b.join_iso || b.join_date));
             if (key === 'new_to_awana' || key === 'new') {
                 var an = a.is_new_to_awana ? 1 : 0;
                 var bn = b.is_new_to_awana ? 1 : 0;
@@ -7420,12 +7426,12 @@ else:
                         return;
                     }
                     var rows = [];
-                    var header = ['PeopleId', 'Name', 'Age', 'Grade', 'Gender', 'Email', 'Emergency Contact', 'Parents'];
+                    var header = ['PeopleId', 'Name', 'Age', 'Grade', 'Gender', 'Join Date', 'Email', 'Emergency Contact', 'Parents'];
                     (data.people || []).forEach(function(p) {
                         rows.push([
                             p.people_id, p.name,
                             (p.age === 0 || p.age) ? p.age : '',
-                            p.grade, p.gender, p.email, p.emergency, p.parents
+                            p.grade, p.gender, p.join_date || '', p.email, p.emergency, p.parents
                         ]);
                     });
                     downloadCsv(filename, header, rows);
@@ -8096,39 +8102,53 @@ else:
             $('#reg-breadcrumb').html(parts.join(' <i class="fa fa-chevron-right"></i> '));
         }
 
+        function renderClubOverviewTable() {
+            var people = clubOverviewState.people || [];
+            if (!people.length) {
+                $('#club-overview-view').html('<div class="empty-state">No clubbers in this club.</div>');
+                return;
+            }
+            var sortKey = clubOverviewState.sortKey || 'last';
+            var sortDir = clubOverviewState.sortDir || 'asc';
+            people = sortPeopleRows(people, sortKey, sortDir);
+            var ids = collectPeopleIds(people);
+            var html = '<div class="reg-meta" style="margin-bottom:14px;">Clubbers: <strong>' +
+                people.length + '</strong></div>';
+            html += drillActionsHtml({ peopleIds: ids });
+            html += '<table class="people-table" data-table-scope="club-overview"><thead><tr>';
+            html += sortHeaderHtml('Person', 'last', sortKey, sortDir);
+            html += sortHeaderHtml('Age', 'age', sortKey, sortDir);
+            html += sortHeaderHtml('Grade', 'grade', sortKey, sortDir);
+            html += sortHeaderHtml('Gender', 'gender', sortKey, sortDir);
+            html += sortHeaderHtml('Join Date', 'join', sortKey, sortDir);
+            html += '</tr></thead><tbody>';
+            people.forEach(function(p) {
+                html += '<tr><td>' + personLink(p.people_id, p.name);
+                if (p.has_allergy) {
+                    html += ' <a href="#" class="allergy-flag" title="Has allergy — open Allergies">A</a>';
+                }
+                html += '</td>';
+                html += '<td>' + esc(p.age === 0 || p.age ? String(p.age) : '') + '</td>';
+                html += '<td>' + esc(p.grade || '') + '</td>';
+                html += '<td>' + esc(p.gender || '') + '</td>';
+                html += '<td>' + esc(p.join_date || '') + '</td></tr>';
+            });
+            html += '</tbody></table>';
+            $('#club-overview-view').html(html);
+        }
+
         function loadClubOverview() {
             if (!currentOrgId) return;
             showLoading('Loading clubbers...', false);
             $('#club-overview-view').html('<div class="empty-state">Loading...</div>');
             clubPost({ action: 'get_club_roster' }, function(data) {
                 if (data && data.error) {
+                    clubOverviewState.people = [];
                     $('#club-overview-view').html('<div class="info-banner">Error: ' + esc(data.error) + '</div>');
                     return;
                 }
-                var people = (data && data.people) || [];
-                if (!people.length) {
-                    $('#club-overview-view').html('<div class="empty-state">No clubbers in this club.</div>');
-                    return;
-                }
-                var ids = collectPeopleIds(people);
-                var html = '<div class="reg-meta" style="margin-bottom:14px;">Clubbers: <strong>' +
-                    people.length + '</strong></div>';
-                html += drillActionsHtml({ peopleIds: ids });
-                html += '<table class="people-table"><thead><tr>';
-                html += '<th>Person</th><th>Age</th><th>Grade</th><th>Gender</th>';
-                html += '</tr></thead><tbody>';
-                people.forEach(function(p) {
-                    html += '<tr><td>' + personLink(p.people_id, p.name);
-                    if (p.has_allergy) {
-                        html += ' <a href="#" class="allergy-flag" title="Has allergy — open Allergies">A</a>';
-                    }
-                    html += '</td>';
-                    html += '<td>' + esc(p.age === 0 || p.age ? String(p.age) : '') + '</td>';
-                    html += '<td>' + esc(p.grade || '') + '</td>';
-                    html += '<td>' + esc(p.gender || '') + '</td></tr>';
-                });
-                html += '</tbody></table>';
-                $('#club-overview-view').html(html);
+                clubOverviewState.people = (data && data.people) || [];
+                renderClubOverviewTable();
             }, { showLoading: true });
         }
 
