@@ -1,0 +1,504 @@
+# Script: on_enroll_awana_club_notify.py
+# Purpose: OnEnroll — email club leaders the full registration submission for each
+#   child based on the Awana club SubGroup selected during registration.
+# Author: Jake Pierson
+# Date: 2026-08-05
+#
+# Install: Upload as a Python Script in TouchPoint (Special Content > Python Scripts)
+#   and set Involvement 1916 Registration setting "OnEnroll Script Name" to that
+#   script's Name (e.g. on_enroll_awana_club_notify).
+#
+# Notes:
+#   - OnEnroll runs once per enrollee, so a family registering multiple kids
+#     produces one notification email per child.
+#   - New Registration Form OnEnroll Data stores each answer twice (RegQuestionId
+#     GUID key + Label key). This script emails Label + human answer only.
+#   - Club is detected via model.InSubGroup (MemberTag committed before OnEnroll).
+#   - SubGroup names keep their spaces (e.g. "TnT Girls") for admin clarity.
+#
+# IronPython 2.7 — TouchPoint embeds IronPython; avoid Python 3-only syntax.
+
+import json
+import re
+
+# --- Guard ---
+ORG_ID = 1916
+
+# --- Recipients (comma-separated PeopleIds OK) ---
+PugglesContact = "8746"
+CubbiesContact = "1551"
+SparksContact = "547,2785,2856,1505"
+TnTGirlsContact = "971,625"
+TnTBoysContact = "972,625"
+DefaultContact = "3147"
+
+# --- Email ---
+FromName = "Awana"
+FromAddress = "awana@fcchudson.com"
+QueuedBy = 3147
+
+# SubGroup name (exact, including spaces) -> contact PeopleId CSV
+# Order matters for detection when scanning; radio is single-select so only one matches.
+CLUB_ORDER = [
+    "Puggles",
+    "Cubbies",
+    "Sparks",
+    "TnT Girls",
+    "TnT Boys",
+]
+CLUB_CONTACTS = {
+    "Puggles": PugglesContact,
+    "Cubbies": CubbiesContact,
+    "Sparks": SparksContact,
+    "TnT Girls": TnTGirlsContact,
+    "TnT Boys": TnTBoysContact,
+}
+
+# Metadata keys — never treated as registration Q&A
+_HEADER_KEYS = set([
+    "PeopleId",
+    "OrganizationId",
+    "InvolvementId",
+    "OnlineNotifyId",
+    "OnlineNotifyEmail",
+    "OnlineNotifyName",
+    "LoggedIn",
+    "FirstName",
+    "LastName",
+    "MemberUs",
+    "OtherChurch",
+    "NoChurch",
+])
+
+# RegQuestionId keys look like: 8d218f0e-df74-4a6b-8836-bbf9f7165e0b or ...[0]
+_GUID_KEY_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(\[\d+\])?$"
+)
+
+
+def _as_int(v, default=0):
+    if v is None:
+        return default
+    try:
+        return int(v)
+    except:
+        return default
+
+
+def _norm(s):
+    if s is None:
+        return ""
+    try:
+        return unicode(s).strip()
+    except:
+        return str(s).strip()
+
+
+def _html(s):
+    t = _norm(s)
+    t = t.replace("&", "&amp;")
+    t = t.replace("<", "&lt;")
+    t = t.replace(">", "&gt;")
+    t = t.replace('"', "&quot;")
+    return t
+
+
+def _parse_pids(csv_text):
+    """Parse comma-separated PeopleIds into a distinct ordered list of ints."""
+    pids = []
+    seen = set()
+    for part in _norm(csv_text).split(","):
+        pid = _as_int(part.strip(), 0)
+        if pid > 0 and pid not in seen:
+            seen.add(pid)
+            pids.append(pid)
+    return pids
+
+
+def _peopleids_query(pids):
+    parts = [str(p) for p in pids]
+    return "peopleids='" + ",".join(parts) + "'"
+
+
+def _detect_club(people_id, org_id):
+    """Return matching club SubGroup name, or empty string."""
+    for club in CLUB_ORDER:
+        try:
+            if model.InSubGroup(people_id, org_id, club):
+                return club
+        except Exception, ex:
+            print "on_enroll_awana_club_notify: InSubGroup error for '{0}': {1}".format(
+                club, ex
+            )
+
+    # SQL fallback (exact name match, including spaces)
+    try:
+        p = model.DynamicData()
+        p.PeopleId = people_id
+        p.OrgId = org_id
+        sql = """
+SELECT mt.Name
+FROM dbo.OrgMemMemTags omt
+JOIN dbo.MemberTags mt ON mt.Id = omt.MemberTagId
+WHERE omt.PeopleId = @PeopleId AND omt.OrgId = @OrgId
+"""
+        rows = q.QuerySql(sql, p)
+        names = []
+        for row in rows:
+            names.append(_norm(row.Name))
+        for club in CLUB_ORDER:
+            if club in names:
+                return club
+        if names:
+            print "on_enroll_awana_club_notify: SubGroups found but no club match: {0}".format(
+                ", ".join(names)
+            )
+    except Exception, ex:
+        print "on_enroll_awana_club_notify: SubGroup SQL fallback error: {0}".format(ex)
+
+    return ""
+
+
+def _is_guid_key(s):
+    return bool(_GUID_KEY_RE.match(_norm(s)))
+
+
+def _parse_answer(raw):
+    """Parse RegAnswer.AnswerValue (JSON string/array or plain text)."""
+    s = _norm(raw)
+    if not s:
+        return None
+    try:
+        return json.loads(s)
+    except:
+        return s
+
+
+def _parse_options(options_json):
+    raw = _norm(options_json)
+    if not raw:
+        return []
+    try:
+        opts = json.loads(raw)
+    except:
+        return []
+    if not isinstance(opts, list):
+        return []
+    result = []
+    for o in opts:
+        if not isinstance(o, dict):
+            continue
+        text = _norm(o.get("text") or o.get("Text"))
+        value = _norm(o.get("value") or o.get("Value") or text)
+        lookup = _norm(o.get("lookup") or o.get("Lookup"))
+        result.append({
+            "text": text or value,
+            "value": value or text,
+            "lookup": lookup,
+        })
+    return result
+
+
+def _option_text(options, token):
+    """Map a stored option value/text/lookup to display Text."""
+    t = _norm(token)
+    if not t:
+        return ""
+    for o in options or []:
+        if t == o.get("value") or t == o.get("text") or t == o.get("lookup"):
+            return o.get("text") or t
+    return t
+
+
+def _is_blank_answer(val):
+    if val is None:
+        return True
+    if isinstance(val, bool):
+        return False
+    if isinstance(val, list):
+        for x in val:
+            s = _norm(x)
+            if s and s != "0" and s.lower() != "null":
+                return False
+        return True
+    s = _norm(val)
+    if not s:
+        return True
+    if s.replace("\n", "").replace("null", "").strip() == "":
+        return True
+    return False
+
+
+def _answer_display(val, options):
+    """Human-readable answer; resolve choice values to option Text when possible."""
+    if val is None:
+        return ""
+    if isinstance(val, bool):
+        return "Yes" if val else "No"
+    if isinstance(val, list):
+        parts = []
+        for x in val:
+            s = _norm(x)
+            if not s or s == "0" or s.lower() == "null":
+                continue
+            parts.append(_option_text(options, s))
+        return ", ".join(parts)
+    s = _norm(val)
+    if "\n" in s:
+        # Parents / Emergency often store lines (name / phone, mother / father)
+        lines = []
+        for line in s.split("\n"):
+            t = _norm(line)
+            if t and t.lower() != "null":
+                lines.append(t)
+        return " / ".join(lines)
+    return _option_text(options, s)
+
+
+def _format_data_value(val):
+    """Format an OnEnroll Data value (string, .NET array, etc.)."""
+    if val is None:
+        return ""
+    if isinstance(val, bool):
+        return "Yes" if val else "No"
+    if isinstance(val, basestring):
+        parsed = _parse_answer(val)
+        if parsed is not None and parsed != val:
+            return _answer_display(parsed, None)
+        return _answer_display(val, None)
+    # .NET arrays expose Length
+    try:
+        if hasattr(val, "Length") and not isinstance(val, basestring):
+            parts = []
+            i = 0
+            while i < int(val.Length):
+                parts.append(_format_data_value(val[i]))
+                i += 1
+            return ", ".join([p for p in parts if p])
+    except:
+        pass
+    if hasattr(val, "__iter__") and not isinstance(val, basestring):
+        try:
+            return ", ".join([p for p in [_format_data_value(x) for x in val] if p])
+        except:
+            pass
+    return _norm(val)
+
+
+def _qa_from_reg_answers(people_id, org_id):
+    """
+    Preferred source: RegQuestion.Label + RegAnswer display text for this
+    person's latest completed registration on the involvement.
+    Returns list of (label, answer) tuples.
+    """
+    pairs = []
+    try:
+        p = model.DynamicData()
+        p.PeopleId = people_id
+        p.OrgId = org_id
+        # OnEnroll runs before CompleteRegistration sets CompletedDate/Status,
+        # so pick the newest RegPeople row for this person on this involvement.
+        sql = """
+;WITH Ranked AS (
+    SELECT
+        rp.RegPeopleId,
+        ROW_NUMBER() OVER (
+            ORDER BY r.CreatedDate DESC, rp.RegPeopleId DESC
+        ) AS rn
+    FROM dbo.RegPeople rp
+    INNER JOIN dbo.Registration r ON r.RegistrationId = rp.RegistrationId
+    WHERE r.OrganizationId = @OrgId
+      AND rp.PeopleId = @PeopleId
+)
+SELECT rq.Label, rq.[Order], rq.Options, ra.AnswerValue
+FROM Ranked rk
+INNER JOIN dbo.RegAnswer ra ON ra.RegPeopleId = rk.RegPeopleId
+INNER JOIN dbo.RegQuestion rq ON rq.RegQuestionId = ra.RegQuestionId
+WHERE rk.rn = 1
+  AND ISNULL(rq.IsDisabled, 0) = 0
+ORDER BY rq.[Order], rq.Label
+"""
+        rows = q.QuerySql(sql, p)
+        for row in rows:
+            label = _norm(row.Label)
+            if not label or _is_guid_key(label):
+                continue
+            options = _parse_options(row.Options)
+            parsed = _parse_answer(row.AnswerValue)
+            if _is_blank_answer(parsed):
+                continue
+            answer = _answer_display(parsed, options)
+            if not answer or _is_guid_key(answer):
+                # Skip unresolved option IDs; club still shown from SubGroup header
+                continue
+            pairs.append((label, answer))
+    except Exception, ex:
+        print "on_enroll_awana_club_notify: RegAnswer Q&A error: {0}".format(ex)
+    return pairs
+
+
+def _qa_from_data():
+    """
+    Fallback: OnEnroll Data label keys only (skip RegQuestionId GUID keys).
+    Returns list of (label, answer) tuples.
+    """
+    pairs = []
+    seen = set()
+    try:
+        for key in Data.Keys():
+            label = _norm(key)
+            if not label or label in _HEADER_KEYS:
+                continue
+            if _is_guid_key(label):
+                continue
+            if label in seen:
+                continue
+            answer = _format_data_value(Data.GetValue(key))
+            if _is_blank_answer(answer) or _is_guid_key(answer):
+                continue
+            seen.add(label)
+            pairs.append((label, answer))
+    except Exception, ex:
+        print "on_enroll_awana_club_notify: Data Q&A error: {0}".format(ex)
+    return pairs
+
+
+def _load_org_member(people_id, org_id):
+    """Return (register_email, org_name) from OrganizationMembers."""
+    reg_email = ""
+    org_name = ""
+    try:
+        p = model.DynamicData()
+        p.PeopleId = people_id
+        p.OrgId = org_id
+        sql = """
+SELECT om.RegisterEmail, o.OrganizationName
+FROM dbo.OrganizationMembers om
+JOIN dbo.Organizations o ON o.OrganizationId = om.OrganizationId
+WHERE om.PeopleId = @PeopleId AND om.OrganizationId = @OrgId
+"""
+        rows = q.QuerySql(sql, p)
+        for row in rows:
+            reg_email = _norm(row.RegisterEmail)
+            org_name = _norm(row.OrganizationName)
+            break
+    except Exception, ex:
+        print "on_enroll_awana_club_notify: OrgMember lookup error: {0}".format(ex)
+    return reg_email, org_name
+
+
+def _qa_row(label, answer):
+    return (
+        "<tr><td style='padding:4px 16px 4px 0;vertical-align:top;font-weight:bold;'>"
+        + _html(label)
+        + "</td><td style='padding:4px 0;vertical-align:top;'>"
+        + _html(answer)
+        + "</td></tr>"
+    )
+
+
+def _build_body(people_id, org_id, who, club, reg_email, org_name):
+    rows = []
+    rows.append(_qa_row("Registrant", "{0} (PeopleId {1})".format(who, people_id)))
+    rows.append(
+        _qa_row(
+            "Involvement",
+            "{0} ({1})".format(org_name or ("OrganizationId " + str(org_id)), org_id),
+        )
+    )
+    rows.append(_qa_row("Club (SubGroup)", club if club else "(none / unmatched)"))
+    if reg_email:
+        rows.append(_qa_row("Register Email", reg_email))
+
+    qa = _qa_from_reg_answers(people_id, org_id)
+    if not qa:
+        print "on_enroll_awana_club_notify: RegAnswer Q&A empty; falling back to Data labels"
+        qa = _qa_from_data()
+
+    if qa:
+        rows.append(
+            "<tr><td colspan='2' style='padding:12px 0 4px;font-weight:bold;"
+            "border-top:1px solid #ccc;'>Registration Answers</td></tr>"
+        )
+        for label, answer in qa:
+            rows.append(_qa_row(label, answer))
+
+    body = (
+        "<p>A new Awana registration was completed.</p>"
+        "<table style='border-collapse:collapse;font-family:Arial,sans-serif;font-size:14px;'>"
+        + "".join(rows)
+        + "</table>"
+    )
+    return body
+
+
+# --- main ---
+people_id = _as_int(Data.GetValue("PeopleId"))
+if people_id <= 0:
+    people_id = _as_int(getattr(Data, "PeopleId", None))
+
+org_id = _as_int(Data.GetValue("OrganizationId"))
+if org_id <= 0:
+    org_id = _as_int(Data.GetValue("InvolvementId"))
+if org_id <= 0:
+    org_id = _as_int(getattr(Data, "OrganizationId", None))
+
+if org_id != ORG_ID:
+    print "on_enroll_awana_club_notify: skip — OrganizationId {0} != {1}".format(
+        org_id, ORG_ID
+    )
+elif people_id <= 0:
+    print "on_enroll_awana_club_notify: skip — missing PeopleId"
+else:
+    first = _norm(Data.GetValue("FirstName"))
+    last = _norm(Data.GetValue("LastName"))
+    who = (first + " " + last).strip() or ("PeopleId " + str(people_id))
+
+    club = _detect_club(people_id, org_id)
+    if club:
+        contact_csv = CLUB_CONTACTS.get(club, DefaultContact)
+        used_default = False
+    else:
+        contact_csv = DefaultContact
+        used_default = True
+        print "on_enroll_awana_club_notify: no club SubGroup matched; using DefaultContact"
+
+    recipient_pids = _parse_pids(contact_csv)
+    if not recipient_pids:
+        recipient_pids = _parse_pids(DefaultContact)
+        used_default = True
+        print "on_enroll_awana_club_notify: empty contact list; falling back to DefaultContact"
+
+    if not recipient_pids:
+        print "on_enroll_awana_club_notify: abort — no recipient PeopleIds configured"
+    else:
+        reg_email, org_name = _load_org_member(people_id, org_id)
+        subject = "Awana registration: {0}".format(who)
+        if club:
+            subject = "Awana registration ({0}): {1}".format(club, who)
+
+        body = _build_body(people_id, org_id, who, club, reg_email, org_name)
+        query = _peopleids_query(recipient_pids)
+
+        try:
+            model.Email(
+                query,
+                int(QueuedBy),
+                FromAddress,
+                FromName,
+                subject,
+                body,
+            )
+            print (
+                "on_enroll_awana_club_notify: emailed PeopleId {0} club='{1}' "
+                "recipients={2} default={3}"
+            ).format(
+                people_id,
+                club or "",
+                ",".join([str(p) for p in recipient_pids]),
+                used_default,
+            )
+        except Exception, ex:
+            print "on_enroll_awana_club_notify: Email failed for PeopleId {0}: {1}".format(
+                people_id, ex
+            )
