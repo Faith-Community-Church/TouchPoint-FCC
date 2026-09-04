@@ -516,6 +516,58 @@ ORDER BY mt.Name
     return out
 
 
+def _is_new_volunteer_tag(name):
+    """True for the Volunteers 'New Volunteer' MemberTag (exact or close)."""
+    n = _s(name).strip().lower()
+    if not n:
+        return False
+    if n == 'new volunteer' or n == 'new-volunteer' or n == 'newvolunteer':
+        return True
+    if 'new volunteer' in n:
+        return True
+    return False
+
+
+def _new_volunteer_subgroup():
+    """MemberTag on Volunteers named New Volunteer, or empty shell."""
+    empty = {'id': 0, 'count': 0, 'name': 'New Volunteer'}
+    if not _user_can_access_org(VOLUNTEERS_ORG_ID):
+        return empty
+    for sg in _org_subgroups(VOLUNTEERS_ORG_ID):
+        if _is_new_volunteer_tag(sg.get('name')):
+            return {
+                'id': _i(sg.get('id'), 0),
+                'count': _i(sg.get('count'), 0),
+                'name': _s(sg.get('name'), 'New Volunteer'),
+            }
+    return empty
+
+
+def _new_volunteer_people_id_set():
+    """PeopleIds on the Volunteers 'New Volunteer' subgroup."""
+    tag_id = _i(_new_volunteer_subgroup().get('id'), 0)
+    if tag_id <= 0:
+        return set()
+    sql = """
+SELECT omt.PeopleId
+FROM dbo.OrgMemMemTags omt
+WHERE omt.OrgId = @orgId
+  AND omt.MemberTagId = @tagId
+"""
+    p = _dd()
+    p.AddValue('orgId', VOLUNTEERS_ORG_ID)
+    p.AddValue('tagId', tag_id)
+    out = set()
+    try:
+        for r in q.QuerySql(sql, p):
+            pid = _i(r.PeopleId, 0)
+            if pid > 0:
+                out.add(pid)
+    except:
+        return set()
+    return out
+
+
 def _map_subgroups_to_clubs(subgroups):
     """Match subgroups onto club keys. Prefer exact label match if two tags collide."""
     mapped = {}
@@ -2709,13 +2761,19 @@ SELECT
     ISNULL(rr.fname, '') AS FatherName,
     ISNULL(rr.emcontact, '') AS EmContact,
     ISNULL(rr.emphone, '') AS EmPhone,
-    om.EnrollmentDate AS JoinDate
+    om.EnrollmentDate AS JoinDate,
+    COALESCE(
+        NULLIF(LTRIM(RTRIM(om.ShirtSize)), ''),
+        NULLIF(LTRIM(RTRIM(ss.Description)), ''),
+        NULLIF(LTRIM(RTRIM(ss.Code)), '')
+    ) AS ShirtSize
 """ + staff_select + """
 FROM OrganizationMembers om
 INNER JOIN People pe ON pe.PeopleId = om.PeopleId
 LEFT JOIN lookup.GradeLevel gl_pe ON pe.GradeLevelId = gl_pe.Id
 LEFT JOIN lookup.GradeLevel gl_om ON om.GradeLevelId = gl_om.Id
 LEFT JOIN RecReg rr ON rr.PeopleId = pe.PeopleId
+LEFT JOIN lookup.ShirtSize ss ON ss.Id = pe.ShirtSizeId
 """ + staff_join + """
 WHERE om.OrganizationId = @orgId
   AND pe.IsDeceased = 0
@@ -2789,6 +2847,7 @@ ORDER BY PersonName
             'join_date': _fmt_date(r.JoinDate) if hasattr(r, 'JoinDate') else '',
             'join_iso': _fmt_iso(
                 r.JoinDate if hasattr(r, 'JoinDate') else None, ''),
+            'shirt_size': _s(r.ShirtSize) if hasattr(r, 'ShirtSize') else '',
         }
         if include_staff:
             bg_date = _fmt_date(r.BgDate) if hasattr(r, 'BgDate') else ''
@@ -4194,10 +4253,13 @@ if is_ajax:
                     data = _get_club_roster(org_id, _i(_data('subgroup_id'), 0), include_staff)
                     if mode in ('overview', 'staff'):
                         cmap = _volunteer_clubs_by_people(org_id)
+                        nv_ids = _new_volunteer_people_id_set()
                         for person in data.get('people') or []:
-                            labels = cmap.get(person.get('people_id'), [])
+                            pid = _i(person.get('people_id'), 0)
+                            labels = cmap.get(pid, [])
                             person['clubs'] = labels
                             person['clubs_label'] = ', '.join(labels)
+                            person['is_new_volunteer'] = pid in nv_ids
                     data['mode'] = mode
                     _json_out(data)
         except Exception, e:
@@ -4868,7 +4930,7 @@ else:
         flex-wrap: wrap;
         align-items: center;
         gap: 6px;
-        margin: 0 0 16px 16px;
+        margin: 0 0 16px 0;
         padding: 6px;
         background: #f1f5f9;
         border-radius: 12px;
@@ -7105,6 +7167,12 @@ else:
             if (key === 'handbook') return s(a.handbook_iso || a.handbook_date).localeCompare(
                 s(b.handbook_iso || b.handbook_date));
             if (key === 'allergy') return s(a.allergy).localeCompare(s(b.allergy));
+            if (key === 'shirt' || key === 'shirt_size') return s(a.shirt_size).localeCompare(s(b.shirt_size));
+            if (key === 'new_volunteer') {
+                var av = a.is_new_volunteer ? 1 : 0;
+                var bv = b.is_new_volunteer ? 1 : 0;
+                return av - bv;
+            }
             if (key === 'join' || key === 'join_date') return s(a.join_iso || a.join_date).localeCompare(
                 s(b.join_iso || b.join_date));
             if (key === 'new_to_awana' || key === 'new') {
@@ -7219,6 +7287,7 @@ else:
                 : (volRosterState.sortDir || 'asc');
             var people = (key === 'staff') ? staffFilterPeople(allPeople, filter) : allPeople;
             people = sortPeopleRows(people, sortKey, sortDir);
+            var showShirt = (key === 'overview');
             var title = 'Volunteers';
             if (key === 'overview') title = 'All volunteers';
             else if (key === 'staff') title = 'Volunteer Management';
@@ -7268,6 +7337,10 @@ else:
                 html += sortHeaderHtml('Age', 'age', sortKey, sortDir);
                 html += sortHeaderHtml('Clubs', 'clubs', sortKey, sortDir);
             }
+            if (showShirt) {
+                html += sortHeaderHtml('Shirt Size', 'shirt', sortKey, sortDir);
+                html += sortHeaderHtml('New Volunteer', 'new_volunteer', sortKey, sortDir);
+            }
             if (key === 'staff') {
                 html += sortHeaderHtml('Application', 'app', sortKey, sortDir);
                 html += sortHeaderHtml('Background Check', 'bg', sortKey, sortDir);
@@ -7281,6 +7354,10 @@ else:
                 if (key === 'overview' || key === 'staff') {
                     html += '<td>' + esc(p.age === 0 || p.age ? String(p.age) : '') + '</td>';
                     html += '<td>' + esc(p.clubs_label || '') + '</td>';
+                }
+                if (showShirt) {
+                    html += '<td>' + esc(p.shirt_size || '') + '</td>';
+                    html += '<td>' + esc(p.is_new_volunteer ? 'Yes' : '') + '</td>';
                 }
                 if (key === 'staff') {
                     html += '<td>' + esc(p.app_date || (p.has_application ? 'On file' : '')) + '</td>';
@@ -7476,12 +7553,13 @@ else:
                         ]);
                     });
                 } else if (mode === 'overview') {
-                    header = ['PeopleId', 'Last', 'First', 'Name', 'Age', 'Clubs', 'Email'];
+                    header = ['PeopleId', 'Last', 'First', 'Name', 'Age', 'Clubs', 'Shirt Size', 'New Volunteer', 'Email'];
                     people.forEach(function(p) {
                         rows.push([
                             p.people_id, p.last, p.first, p.name,
                             (p.age === 0 || p.age) ? p.age : '',
-                            p.clubs_label || '', p.email
+                            p.clubs_label || '', p.shirt_size || '',
+                            p.is_new_volunteer ? 'Yes' : '', p.email
                         ]);
                     });
                 } else {

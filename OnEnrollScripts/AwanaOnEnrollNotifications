@@ -13,8 +13,9 @@
 #     produces one notification email per child.
 #   - New Registration Form OnEnroll Data stores each answer twice (RegQuestionId
 #     GUID key + Label key). This script emails Label + human answer only.
-#   - Club is detected via model.InSubGroup (MemberTag committed before OnEnroll).
-#   - SubGroup names keep their spaces (e.g. "TnT Girls") for admin clarity.
+#   - Club is detected via model.InSubGroup (MemberTag committed before OnEnroll)
+#     and a SQL fallback. T&T matching uses the same aliases as
+#     AwanaRegistrationDashboard (T&T / TnT / T and T / hyphenated).
 #
 # IronPython 2.7 — TouchPoint embeds IronPython; avoid Python 3-only syntax.
 
@@ -37,21 +38,30 @@ FromName = "Awana"
 FromAddress = "awana@fcchudson.com"
 QueuedBy = 3147
 
-# SubGroup name (exact, including spaces) -> contact PeopleId CSV
-# Order matters for detection when scanning; radio is single-select so only one matches.
-CLUB_ORDER = [
-    "Puggles",
-    "Cubbies",
-    "Sparks",
-    "TnT Girls",
-    "TnT Boys",
+# Same club keys / labels / aliases as Dashboards/AwanaRegistrationDashboard.py.
+# Exact label match first, then substring on match[]. T&T Girls/Boys before any
+# generic T&T. Canonical labels are T&T Girls / T&T Boys.
+AWANA_CLUBS = [
+    {"key": "puggles", "label": "Puggles", "match": ["puggles"]},
+    {"key": "cubbies", "label": "Cubbies", "match": ["cubbies"]},
+    {"key": "sparks", "label": "Sparks", "match": ["sparks"]},
+    {
+        "key": "tnt-girls",
+        "label": "T&T Girls",
+        "match": ["tnt girls", "t&t girls", "t and t girls", "tnt-girls", "t&t-girls"],
+    },
+    {
+        "key": "tnt-boys",
+        "label": "T&T Boys",
+        "match": ["tnt boys", "t&t boys", "t and t boys", "tnt-boys", "t&t-boys"],
+    },
 ]
 CLUB_CONTACTS = {
-    "Puggles": PugglesContact,
-    "Cubbies": CubbiesContact,
-    "Sparks": SparksContact,
-    "TnT Girls": TnTGirlsContact,
-    "TnT Boys": TnTBoysContact,
+    "puggles": PugglesContact,
+    "cubbies": CubbiesContact,
+    "sparks": SparksContact,
+    "tnt-girls": TnTGirlsContact,
+    "tnt-boys": TnTBoysContact,
 }
 
 # Metadata keys — never treated as registration Q&A
@@ -120,18 +130,58 @@ def _peopleids_query(pids):
     return "peopleids='" + ",".join(parts) + "'"
 
 
-def _detect_club(people_id, org_id):
-    """Return matching club SubGroup name, or empty string."""
-    for club in CLUB_ORDER:
-        try:
-            if model.InSubGroup(people_id, org_id, club):
+def _club_for_name(name):
+    """Return club dict for a subgroup name. Same rules as the dashboard."""
+    n = _norm(name)
+    nlow = n.lower()
+    if not nlow:
+        return None
+    for club in AWANA_CLUBS:
+        if _norm(club.get("label")).lower() == nlow:
+            return club
+    for club in AWANA_CLUBS:
+        for m in club.get("match") or []:
+            needle = _norm(m).lower()
+            if needle and needle in nlow:
                 return club
-        except Exception, ex:
-            print "on_enroll_awana_club_notify: InSubGroup error for '{0}': {1}".format(
-                club, ex
-            )
+    return None
 
-    # SQL fallback (exact name match, including spaces)
+
+def _insubgroup_names(club):
+    """Exact MemberTag strings to try with model.InSubGroup."""
+    names = []
+    seen = set()
+    extras = [club.get("label")] + list(club.get("match") or [])
+    # Common admin spellings not already in match[] (InSubGroup is exact).
+    if club.get("key") == "tnt-girls":
+        extras.extend(["TnT Girls", "TNT Girls", "T & T Girls"])
+    elif club.get("key") == "tnt-boys":
+        extras.extend(["TnT Boys", "TNT Boys", "T & T Boys"])
+    for raw in extras:
+        n = _norm(raw)
+        if not n:
+            continue
+        key = n.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        names.append(n)
+    return names
+
+
+def _detect_club(people_id, org_id):
+    """Return matching AWANA_CLUBS dict, or None."""
+    for club in AWANA_CLUBS:
+        for name in _insubgroup_names(club):
+            try:
+                if model.InSubGroup(people_id, org_id, name):
+                    return club
+            except Exception, ex:
+                print "on_enroll_awana_club_notify: InSubGroup error for '{0}': {1}".format(
+                    name, ex
+                )
+
+    # SQL fallback — match actual MemberTag.Name with dashboard aliases
     try:
         p = model.DynamicData()
         p.PeopleId = people_id
@@ -146,8 +196,9 @@ WHERE omt.PeopleId = @PeopleId AND omt.OrgId = @OrgId
         names = []
         for row in rows:
             names.append(_norm(row.Name))
-        for club in CLUB_ORDER:
-            if club in names:
+        for tag in names:
+            club = _club_for_name(tag)
+            if club:
                 return club
         if names:
             print "on_enroll_awana_club_notify: SubGroups found but no club match: {0}".format(
@@ -156,7 +207,7 @@ WHERE omt.PeopleId = @PeopleId AND omt.OrgId = @OrgId
     except Exception, ex:
         print "on_enroll_awana_club_notify: SubGroup SQL fallback error: {0}".format(ex)
 
-    return ""
+    return None
 
 
 def _is_guid_key(s):
@@ -455,8 +506,9 @@ else:
     who = (first + " " + last).strip() or ("PeopleId " + str(people_id))
 
     club = _detect_club(people_id, org_id)
+    club_label = club.get("label") if club else ""
     if club:
-        contact_csv = CLUB_CONTACTS.get(club, DefaultContact)
+        contact_csv = CLUB_CONTACTS.get(club.get("key"), DefaultContact)
         used_default = False
     else:
         contact_csv = DefaultContact
@@ -474,10 +526,10 @@ else:
     else:
         reg_email, org_name = _load_org_member(people_id, org_id)
         subject = "Awana registration: {0}".format(who)
-        if club:
-            subject = "Awana registration ({0}): {1}".format(club, who)
+        if club_label:
+            subject = "Awana registration ({0}): {1}".format(club_label, who)
 
-        body = _build_body(people_id, org_id, who, club, reg_email, org_name)
+        body = _build_body(people_id, org_id, who, club_label, reg_email, org_name)
         query = _peopleids_query(recipient_pids)
 
         try:
@@ -494,7 +546,7 @@ else:
                 "recipients={2} default={3}"
             ).format(
                 people_id,
-                club or "",
+                club_label,
                 ",".join([str(p) for p in recipient_pids]),
                 used_default,
             )
