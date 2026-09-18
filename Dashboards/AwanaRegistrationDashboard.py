@@ -544,19 +544,34 @@ def _new_volunteer_subgroup():
 
 
 def _new_volunteer_people_id_set():
-    """PeopleIds on the Volunteers 'New Volunteer' subgroup."""
-    tag_id = _i(_new_volunteer_subgroup().get('id'), 0)
-    if tag_id <= 0:
+    """PeopleIds on the Volunteers 'New Volunteer' MemberTag."""
+    oid = _i(VOLUNTEERS_ORG_ID, 0)
+    if oid <= 0 or not _user_can_access_org(oid):
         return set()
-    sql = """
-SELECT omt.PeopleId
-FROM dbo.OrgMemMemTags omt
-WHERE omt.OrgId = @orgId
-  AND omt.MemberTagId = @tagId
+    tag_sql = """
+SELECT mt.Id AS TagId, mt.Name AS TagName
+FROM dbo.MemberTags mt
+WHERE mt.OrgId = @orgId
 """
     p = _dd()
-    p.AddValue('orgId', VOLUNTEERS_ORG_ID)
-    p.AddValue('tagId', tag_id)
+    p.AddValue('orgId', oid)
+    tag_ids = []
+    try:
+        for r in q.QuerySql(tag_sql, p):
+            if _is_new_volunteer_tag(r.TagName if hasattr(r, 'TagName') else ''):
+                tid = _i(r.TagId, 0)
+                if tid > 0:
+                    tag_ids.append(tid)
+    except:
+        return set()
+    if not tag_ids:
+        return set()
+    sql = """
+SELECT DISTINCT omt.PeopleId
+FROM dbo.OrgMemMemTags omt
+WHERE omt.OrgId = @orgId
+  AND omt.MemberTagId IN ({0})
+""".format(_meeting_ids_sql_in(tag_ids))
     out = set()
     try:
         for r in q.QuerySql(sql, p):
@@ -631,7 +646,7 @@ def _query_source_demo(org_id, tag_id):
         return []
 
 
-def _build_clubs():
+def _build_clubs(need_counts=True):
     """
     Resolve each club's source org + optional subgroup.
 
@@ -642,13 +657,16 @@ def _build_clubs():
 
     A matching "Puggles" tag on a dedicated org is ignored so Config mapping
     is not overridden by leftover Clubbers-style subgroups.
+
+    need_counts=False skips volunteer-tag mapping and member COUNT queries
+    (roster unions only need org_id / subgroup_id).
     """
     clubs = _club_shell()
     by_key = {}
     for c in clubs:
         by_key[c['key']] = c
 
-    if _user_can_access_org(VOLUNTEERS_ORG_ID):
+    if need_counts and _user_can_access_org(VOLUNTEERS_ORG_ID):
         mapped_v, unmatched_v = _map_subgroups_to_clubs(_org_subgroups(VOLUNTEERS_ORG_ID))
         for key, sg in mapped_v.items():
             if key in by_key:
@@ -724,7 +742,7 @@ def _build_clubs():
         if explicit_dedicated:
             c['dedicated_org'] = True
             c['has_source'] = True
-            c['clubbers_count'] = _count_clubber_members(oid, 0)
+            c['clubbers_count'] = _count_clubber_members(oid, 0) if need_counts else 0
             continue
 
         sg = subgroups_by_org.get(oid, {}).get(c['key'])
@@ -736,13 +754,13 @@ def _build_clubs():
             c['clubbers_tag_id'] = tag_id
             c['dedicated_org'] = False
             c['has_source'] = True
-            c['clubbers_count'] = _count_clubber_members(oid, tag_id)
+            c['clubbers_count'] = _count_clubber_members(oid, tag_id) if need_counts else 0
         elif not shared:
             c['subgroup_id'] = 0
             c['clubbers_tag_id'] = 0
             c['dedicated_org'] = True
             c['has_source'] = True
-            c['clubbers_count'] = _count_clubber_members(oid, 0)
+            c['clubbers_count'] = _count_clubber_members(oid, 0) if need_counts else 0
     return clubs
 
 
@@ -2679,7 +2697,7 @@ WHERE omt.OrgId = @orgId
     return out
 
 
-def _get_club_roster(org_id, subgroup_id=0, include_staff=False, members_only=False):
+def _get_club_roster(org_id, subgroup_id=0, include_staff=False, members_only=False, volunteer_ids=None):
     """Org members (optionally one subgroup) for clubber/volunteer lists and CSV."""
     tag_id = _i(subgroup_id, 0)
     staff_select = ''
@@ -2806,7 +2824,11 @@ ORDER BY PersonName
         p.AddValue('minorInPersonField', EV_MINOR_INPERSON)
         p.AddValue('handbookField', EV_AWANA_HANDBOOK)
     rows = list(q.QuerySql(sql, p))
-    volunteer_ids = _volunteer_people_id_set() if members_only else {}
+    if members_only:
+        if volunteer_ids is None:
+            volunteer_ids = _volunteer_people_id_set()
+    else:
+        volunteer_ids = {}
     people = []
     for r in rows:
         pid = _i(r.PeopleId)
@@ -2956,7 +2978,7 @@ def _annotate_new_to_awana(people):
 def _get_master_roster():
     """Union of all club sources (Puggles through T&T), distinct PeopleId."""
     by_pid = {}
-    clubs = _build_clubs()
+    clubs = _build_clubs(need_counts=False)
     volunteer_ids = _volunteer_people_id_set()
     for c in clubs:
         if not c.get('has_source'):
@@ -2968,7 +2990,7 @@ def _get_master_roster():
         denied = _require_org_access(oid)
         if denied:
             continue
-        data = _get_club_roster(oid, tag, members_only=True)
+        data = _get_club_roster(oid, tag, members_only=True, volunteer_ids=volunteer_ids)
         label = _s(c.get('label'))
         for person in data.get('people') or []:
             pid = _i(person.get('people_id'), 0)
@@ -3005,7 +3027,7 @@ def _get_master_roster():
 def _union_across_clubs(fetch):
     """Distinct clubbers across all club sources; fetch(org_id, tag_id) -> {people: [...]}."""
     by_pid = {}
-    clubs = _build_clubs()
+    clubs = _build_clubs(need_counts=False)
     volunteer_ids = _volunteer_people_id_set()
     for c in clubs:
         if not c.get('has_source'):
@@ -4866,6 +4888,39 @@ else:
         opacity: 0.55;
         font-weight: 700;
     }
+    .roster-search-wrap {
+        margin: 0 0 14px 0;
+        max-width: 520px;
+    }
+    .roster-search-wrap .search-row input[type="text"] {
+        padding: 10px 12px;
+        font-size: 16px;
+        border: 2px solid #e2e8f0;
+        border-radius: 8px;
+        background: #fff;
+        color: #1e293b;
+        box-sizing: border-box;
+    }
+    .roster-search-wrap .search-row input[type="text"]:focus {
+        outline: none;
+        border-color: #019cff;
+    }
+    .btn-roster-search-clear {
+        flex-shrink: 0;
+        background: #fff;
+        color: #475569;
+        border: 2px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 10px 16px;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+        white-space: nowrap;
+    }
+    .btn-roster-search-clear:hover {
+        border-color: #012b58;
+        color: #012b58;
+    }
     .staff-filters {
         display: flex;
         flex-wrap: wrap;
@@ -5676,6 +5731,12 @@ else:
             width: 100%;
             font-size: 16px;
         }
+        .roster-search-wrap {
+            max-width: none;
+        }
+        .btn-roster-search-clear {
+            min-height: 44px;
+        }
         .btn-tag-add,
         .btn-reg-excel,
         .btn-reg-audit,
@@ -5877,9 +5938,15 @@ else:
                         <h2 class="section-title" style="margin:0;"><i class="fa fa-list"></i> Master Roster</h2>
                     </div>
                     <p class="finance-drill-hint" style="margin-top:0;margin-bottom:12px;">
-                        All Puggles, Cubbies, Sparks, T&amp;T Girls, and T&amp;T Boys. Filter by gender, grade, or New to Awana, then Add to Tag.
+                        All Puggles, Cubbies, Sparks, T&amp;T Girls, and T&amp;T Boys. Search by name or People ID, then filter by gender, grade, or New to Awana.
                         A red A means an allergy is on file — click it to open Allergies.
                     </p>
+                    <div class="roster-search-wrap" id="roster-search-wrap">
+                        <div class="search-row">
+                            <input type="text" id="roster-search" placeholder="Search by name or People ID..." autocomplete="off" />
+                            <button type="button" class="btn-roster-search-clear" id="btn-roster-search-clear" style="display:none;">Clear</button>
+                        </div>
+                    </div>
                     <div class="staff-filters" id="roster-new-filters"></div>
                     <div class="staff-filters" id="roster-gender-filters"></div>
                     <div class="staff-filters" id="roster-grade-filters"></div>
@@ -5921,6 +5988,12 @@ else:
                     </div>
                 </div>
                 <div class="club-subtabs" id="vol-club-subtabs"></div>
+                <div class="roster-search-wrap" id="vol-search-wrap">
+                    <div class="search-row">
+                        <input type="text" id="vol-search" placeholder="Search by name or People ID..." autocomplete="off" />
+                        <button type="button" class="btn-roster-search-clear" id="btn-vol-search-clear" style="display:none;">Clear</button>
+                    </div>
+                </div>
                 <div id="volunteers-view"></div>
             </div>
         </div>
@@ -6086,10 +6159,10 @@ else:
         var currentVolClubKey = null;
         var currentSubtab = 'club-overview';
         var staffRosterState = { people: [], filter: 'all', sortKey: 'last', sortDir: 'asc' };
-        var volRosterState = { people: [], key: 'overview', sortKey: 'last', sortDir: 'asc' };
+        var volRosterState = { people: [], key: 'overview', sortKey: 'last', sortDir: 'asc', search: '' };
         var masterRosterState = {
-            people: [], gender: 'all', grade: 'all', newFilter: 'all', loaded: false,
-            sortKey: 'last', sortDir: 'asc', subtab: 'roster',
+            people: [], gender: 'all', grade: 'all', newFilter: 'all', search: '',
+            loaded: false, sortKey: 'last', sortDir: 'asc', subtab: 'roster',
             priorConfigured: false, newCount: 0
         };
         var masterAllergyState = { people: [], loaded: false };
@@ -6609,17 +6682,30 @@ else:
             return g;
         }
 
+        function rosterSearchHaystack(p) {
+            return [
+                p.name, p.first, p.last, p.people_id, p.email, p.clubs_label
+            ].join(' ').toLowerCase();
+        }
+
         function filterMasterRoster(people) {
             var gender = masterRosterState.gender || 'all';
             var grade = masterRosterState.grade || 'all';
             var newFilter = masterRosterState.newFilter || 'all';
+            var q = String(masterRosterState.search || '').trim().toLowerCase();
             return (people || []).filter(function(p) {
                 if (gender !== 'all' && rosterNormGender(p.gender) !== gender) return false;
                 if (grade !== 'all' && rosterNormGrade(p.grade) !== grade) return false;
                 if (newFilter === 'new' && !p.is_new_to_awana) return false;
                 if (newFilter === 'returning' && p.is_new_to_awana) return false;
+                if (q && rosterSearchHaystack(p).indexOf(q) < 0) return false;
                 return true;
             });
+        }
+
+        function syncRosterSearchClear() {
+            var has = String(masterRosterState.search || '').trim().length > 0;
+            $('#btn-roster-search-clear').toggle(has);
         }
 
         function rosterTagSuggest() {
@@ -6714,6 +6800,7 @@ else:
 
             if (!allPeople.length) {
                 syncRosterExportButton();
+                syncRosterSearchClear();
                 $('#roster-view').html('<div class="empty-state">No clubbers on the master roster.</div>');
                 return;
             }
@@ -6722,13 +6809,15 @@ else:
             var html = '<div class="reg-meta" style="margin-bottom:14px;">Clubbers: <strong>' +
                 people.length + '</strong>';
             if (masterRosterState.gender !== 'all' || masterRosterState.grade !== 'all' ||
-                masterRosterState.newFilter !== 'all') {
+                masterRosterState.newFilter !== 'all' ||
+                String(masterRosterState.search || '').trim()) {
                 html += ' of ' + allPeople.length;
             }
             html += '</div>';
             html += drillActionsHtml({ peopleIds: ids, tagSuggest: rosterTagSuggest() });
+            syncRosterSearchClear();
             if (!people.length) {
-                html += '<div class="empty-state">No clubbers match this filter.</div>';
+                html += '<div class="empty-state">No clubbers match this search or filter.</div>';
                 $('#roster-view').html(html);
                 return;
             }
@@ -6758,6 +6847,7 @@ else:
             });
             html += '</tbody></table>';
             $('#roster-view').html(html);
+            syncRosterSearchClear();
         }
 
         function loadMasterRoster() {
@@ -7203,6 +7293,30 @@ else:
                 (ind ? '<span class="sort-ind">' + ind + '</span>' : '') + '</th>';
         }
 
+        function filterVolunteerSearch(people) {
+            var q = String(volRosterState.search || '').trim().toLowerCase();
+            if (!q) return people || [];
+            return (people || []).filter(function(p) {
+                return rosterSearchHaystack(p).indexOf(q) >= 0;
+            });
+        }
+
+        function syncVolSearchClear() {
+            var has = String(volRosterState.search || '').trim().length > 0;
+            $('#btn-vol-search-clear').toggle(has);
+        }
+
+        function rerenderVolunteerRoster() {
+            var key = currentVolClubKey || volRosterState.key || 'overview';
+            if (key === 'staff') {
+                renderVolunteerRoster('staff', { people: staffRosterState.people || [] });
+            } else {
+                renderVolunteerRoster(volRosterState.key || key, {
+                    people: volRosterState.people || []
+                });
+            }
+        }
+
         function staffFilterPeople(people, filter) {
             people = people || [];
             if (filter === 'minors') {
@@ -7286,6 +7400,7 @@ else:
                 ? (staffRosterState.sortDir || 'asc')
                 : (volRosterState.sortDir || 'asc');
             var people = (key === 'staff') ? staffFilterPeople(allPeople, filter) : allPeople;
+            people = filterVolunteerSearch(people);
             people = sortPeopleRows(people, sortKey, sortDir);
             var showShirt = (key === 'overview');
             var title = 'Volunteers';
@@ -7297,6 +7412,7 @@ else:
             }
             if (!allPeople.length) {
                 $('#btn-vol-export').hide();
+                syncVolSearchClear();
                 $('#volunteers-view').html('<div class="empty-state">No volunteers' +
                     (key === 'overview' || key === 'staff' ? '.' : ' in <strong>' + esc(title.replace(' volunteers', '')) + '</strong>.') +
                     '</div>');
@@ -7309,16 +7425,20 @@ else:
                 html += staffFilterBarHtml(filter);
             }
             html += '<div class="reg-meta" style="margin-bottom:14px;">' + esc(title) + ': <strong>' + people.length + '</strong>';
-            if (key === 'staff' && filter !== 'all') {
+            if ((key === 'staff' && filter !== 'all') || String(volRosterState.search || '').trim()) {
                 html += ' of ' + allPeople.length;
             }
             html += '</div>';
             var tagOpts = { peopleIds: ids };
             if (key === 'staff') tagOpts.tagSuggest = staffTagSuggest(filter);
             html += drillActionsHtml(tagOpts);
+            syncVolSearchClear();
             if (!people.length) {
                 var emptyMsg = 'No volunteers match this filter.';
-                if (filter === 'minors') emptyMsg = 'No minor volunteers.';
+                var hasSearch = String(volRosterState.search || '').trim();
+                if (hasSearch) {
+                    emptyMsg = 'No volunteers match this search or filter.';
+                } else if (filter === 'minors') emptyMsg = 'No minor volunteers.';
                 else if (filter === 'adults') emptyMsg = 'No adult volunteers.';
                 else if (filter === 'missing-app') emptyMsg = 'No volunteers missing an application.';
                 else if (filter === 'missing-bc') emptyMsg = 'No adults missing a background check.';
@@ -7382,6 +7502,7 @@ else:
             });
             html += '</tbody></table>';
             $('#volunteers-view').html(html);
+            syncVolSearchClear();
         }
 
         $(document).on('click', '.staff-date-update', function() {
@@ -7531,6 +7652,7 @@ else:
                 if (mode === 'staff') {
                     people = staffFilterPeople(people, staffRosterState.filter || 'all');
                 }
+                people = filterVolunteerSearch(people);
                 var rows = [];
                 var header;
                 if (mode === 'staff') {
@@ -7591,6 +7713,30 @@ else:
         $(document).on('click', '[data-roster-new-filter]', function() {
             masterRosterState.newFilter = String($(this).attr('data-roster-new-filter') || 'all');
             renderMasterRoster();
+        });
+
+        $(document).on('input', '#roster-search', function() {
+            masterRosterState.search = String($(this).val() || '');
+            renderMasterRoster();
+        });
+
+        $(document).on('click', '#btn-roster-search-clear', function() {
+            masterRosterState.search = '';
+            $('#roster-search').val('');
+            renderMasterRoster();
+            $('#roster-search').focus();
+        });
+
+        $(document).on('input', '#vol-search', function() {
+            volRosterState.search = String($(this).val() || '');
+            rerenderVolunteerRoster();
+        });
+
+        $(document).on('click', '#btn-vol-search-clear', function() {
+            volRosterState.search = '';
+            $('#vol-search').val('');
+            rerenderVolunteerRoster();
+            $('#vol-search').focus();
         });
 
         $(document).on('click', '#btn-roster-export', function() {
