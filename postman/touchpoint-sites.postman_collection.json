@@ -1,0 +1,160 @@
+{
+  "info": {
+    "_postman_id": "c3b1e7a4-8d2f-4f1a-9b6e-2a1c0d4e5f60",
+    "name": "TouchPoint Sites Data",
+    "description": "Sites endpoints only. Auth scheme is Authorization: Token {{sitesToken}} — not PAT and not Bearer.\n\nRecommended URL is the church host (no CmsHost header). Use the Shared Host folder only if you must call api.tpsdb.com.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "page",
+      "value": "1"
+    },
+    {
+      "key": "take",
+      "value": "50"
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "let token = (pm.environment.get('sitesToken')",
+          "  || pm.environment.get('sitesDataAuthorizationToken')",
+          "  || '').trim();",
+          "token = token.replace(/^(Token|PAT|Bearer)\\s+/i, '').trim();",
+          "if (!token) {",
+          "  throw new Error('Set sitesToken (or sitesDataAuthorizationToken) to the Admin setting SitesDataAuthorizationToken. Confirm the environment dropdown is TouchPoint Sites - FCC Hudson.');",
+          "}",
+          "pm.request.headers.upsert({ key: 'Authorization', value: 'Token ' + token });",
+          "pm.request.headers.upsert({ key: 'Accept', value: 'application/json' });",
+          "console.log('Sites auth: Token header set, length=' + token.length);"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "const code = pm.response.code;",
+          "const body = pm.response.text() || '';",
+          "if (code === 401) {",
+          "  console.warn('Sites 401: token mismatch, Sites sharing disabled, or this feature flag is off (Events / Small Groups / Media).');",
+          "}",
+          "if (code === 403 && body.indexOf('Application-Gateway') !== -1) {",
+          "  console.warn('This 403 is Azure Application Gateway, not TouchPoint. Check the URL for trailing newlines.');",
+          "}",
+          "if (code === 500 && body.indexOf('SQL Server') !== -1) {",
+          "  console.warn('CmsHost / tenant SQL lookup failed. For church-host URLs, CmsHost is not needed.');",
+          "}",
+          "pm.test('Status is 200', function () {",
+          "  pm.response.to.have.status(200);",
+          "});"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "Church host (recommended)",
+      "description": "Calls https://{church}.tpsdb.com/api — hostname selects the tenant. Do not send CmsHost.",
+      "item": [
+        {
+          "name": "Events",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/SitesData/Events?page={{page}}&take={{take}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "SitesData", "Events"],
+              "query": [
+                { "key": "page", "value": "{{page}}" },
+                { "key": "take", "value": "{{take}}" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Small Groups",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/SitesData/SmallGroups?page={{page}}&take={{take}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "SitesData", "SmallGroups"],
+              "query": [
+                { "key": "page", "value": "{{page}}" },
+                { "key": "take", "value": "{{take}}" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Media",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/SitesData/Media?page={{page}}&take={{take}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "SitesData", "Media"],
+              "query": [
+                { "key": "page", "value": "{{page}}" },
+                { "key": "take", "value": "{{take}}" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Shared host api.tpsdb.com",
+      "description": "Only use if you must go through the shared API. Requires CmsHost = church short code (fcchudson), not the full hostname.",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const cmsHost = (pm.environment.get('cmsHost') || '').trim();",
+              "if (!cmsHost) {",
+              "  throw new Error('Shared host calls require cmsHost (short code only, e.g. fcchudson).');",
+              "}",
+              "if (cmsHost.indexOf('.') !== -1 || /^https?:/i.test(cmsHost)) {",
+              "  throw new Error('cmsHost must be the short code only (fcchudson), not fcchudson.tpsdb.com.');",
+              "}",
+              "pm.request.headers.upsert({ key: 'CmsHost', value: cmsHost });"
+            ]
+          }
+        }
+      ],
+      "item": [
+        {
+          "name": "Events (shared host)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{sharedBaseUrl}}/v1/SitesData/Events?page={{page}}&take={{take}}",
+              "host": ["{{sharedBaseUrl}}"],
+              "path": ["v1", "SitesData", "Events"],
+              "query": [
+                { "key": "page", "value": "{{page}}" },
+                { "key": "take", "value": "{{take}}" }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
