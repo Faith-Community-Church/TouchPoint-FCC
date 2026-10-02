@@ -56,6 +56,17 @@ Role logic (same family as other Next Gen tools): `(Staff OR Elders) AND Next Ge
 
 Header: `#Roles=Access`. Finer gates in code.
 
+### Mobile (confirmed)
+
+Must view well on a phone (staff will use this in hallways / on Wednesday night).
+
+- Layout stacks: Home hero / attendance / events / leaders become **one column**
+- **Nav pills stay centered** (wrap as needed; do not left-align because of the collapse caret)
+- Tables scroll horizontally instead of overflowing the page
+- Filter bars and Config fields go full-width
+- Header logo shrinks; tap targets stay at least pill-sized
+- No hover-only actions (Add to Tag, assign, drills work on tap)
+
 ---
 
 ## Fiscal year
@@ -168,7 +179,7 @@ People scope = current members of standing **MS and HS** orgs (union, distinct).
 | Stories of Transformation | Notes with keyword **`Stories of Transformation`** (**TBD** exact Description). Count + name list. FY filter **TBD** (recommend yes) |
 | Baptisms | Same people as Home baptism tile; count + name list + BaptismDate |
 | Decisions | Same notes as Home decisions tile; name list (one row per person, latest note date) |
-| Attrition: Faith Kids / Awana → 6th | Compare prior-year Kids/Awana enrollment (Config **Program / Division** for Faith Kids + Awana) to current 6th-grade enrollment on standing student orgs. Rate = (prior cohort still present) / (prior cohort size). **TBD:** cohort = last FY 5th graders vs anyone who was on those orgs and would now be grade 6 |
+| Attrition: Faith Kids / Awana → 6th | Compare Kids/Awana enrollment (Next Gen **Program 1112** + Config **Division Ids** for Faith Kids and Awana) to current 6th-grade enrollment on standing student orgs. Rate = (prior cohort still present) / (prior cohort size). **TBD:** cohort = last FY 5th graders vs anyone who was on those orgs and would now be grade 6 |
 | Attrition: adjacent grades | For each pair 6→7, 7→8, 8→9, 9→10, 10→11, 11→12: of people who were grade N last year (or last FY members at grade N), how many are grade N+1 and still enrolled. **TBD:** snapshot method (current `GradeLevel` vs `EnrollmentTransaction` + grade at drop) |
 | Senior Year of Discipleship | **Placeholder.** v1 = enrollment count on a Config Org# (0 = hide number, show “Coming soon”) |
 | Students serving outside Refuge | Distinct people who are members of standing Refuge (MS/HS) **and** any Involvement in Config **Volunteer Program** (Prog/Div and/or Org# allow-list). **Must audit** so guest-services / worship / kids / student-leader orgs are complete. v1 ships with Config list + a “needs audit” note on the tile |
@@ -210,14 +221,14 @@ Expand/collapse sections.
 
 - Standing orgs: MS Org#, HS Org#
 - Weekly attendance: which of those orgs count; `week_start_dow`
-- Event discovery: Program Id, Division Id(s); exclude-org list (auto-include standing + leader orgs)
+- Event discovery: Next Gen Program Id (FCC **1112**), optional event Division Id(s); exclude standing + leader orgs
 - Event start-date field (`FirstMeetingDate` vs `CreatedDate`)
 - Leader orgs: Volunteer Leaders, Student Leaders, Small Group Coaches
 - Volunteer Onboarding URL
 - Involvement Dashboard URL (`/PyScriptForm/InvolvementDashboard`)
 - Note keywords: Decisions (two names), Stories of Transformation
 - Baptism scope (org set)
-- Attrition: Kids / Awana Program + Division Ids
+- Attrition: Next Gen Program **1112** + Faith Kids Division Id + Awana Division Id
 - Senior Year Org# (0 = placeholder)
 - Serving-outside: Volunteer Program Id / Division Ids / extra Org#s
 - Small-group orgs that receive the same tag names
@@ -285,3 +296,5 @@ None of these block writing the docs or scaffolding the shell.
 | 2026-09-21 | Initial capture: command center; events via Prog/Div; no Events tab; Home metrics; Volunteers; Demographics; Ministry; Small Groups; weekly attendance + YoY |
 | 2026-09-21 | v1 scaffold: `StudentMinistryCommandCenter.py` + README |
 | 2026-09-21 | Renamed script to `StudentMinistryCentral.py`; config `StudentMinistryCentralConfig` |
+| 2026-09-21 | Kids/Awana comparisons use Division Ids; all Next Gen under Program 1112 |
+| 2026-09-23 | Mobile: stacked Home rows, centered nav, scrollable tables |

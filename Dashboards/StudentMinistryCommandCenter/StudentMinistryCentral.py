@@ -1,6 +1,6 @@
 #Roles=Access
 # Script: StudentMinistryCentral.py
-# Purpose: Refuge / Student Ministry command center. Home (attendance, FY
+# Purpose: Student Ministry Central. Home (attendance, FY
 #   events, decisions, baptisms, leader tiles), Volunteers, Demographics,
 #   Ministry outcomes, and Small Groups (VBS-style assign). Event detail
 #   launches Involvement Dashboard; volunteer intake launches Onboarding.
@@ -29,30 +29,40 @@ try:
 except:
     pass
 
-APP_TITLE = 'Student Ministry Command Center'
+APP_TITLE = 'Student Ministry Central'
 CONFIG_CONTENT_NAME = 'StudentMinistryCentralConfig'
 SCRIPT_FALLBACK = 'StudentMinistryCentral'
+# All Next Generation involvements (Kids, Awana, Students, events) sit under this Program.
+NEXT_GEN_PROGRAM_ID = 1112
+# FCC Student Ministry events Division under Program 1112.
+EVENT_DIVISION_ID = 46
+# Volunteer Program — student serving-outside involvements.
+VOLUNTEER_PROGRAM_ID = 1120
 HEADER_LOGO_URL = (
     'https://irp.cdn-website.com/395ab2a8/dms3rep/multi/opt/RefugeStudents-logos-40-1920w.png'
 )
 
+# Refuge / Student Ministry palette only — not FCC church brand.
+# Combo 1: Navy + Ice + Spruce (Tennis Ball accent)
+# Combo 2: Navy + Artisan + Snow + Ice
 BRAND = {
-    'black-pearl': '#001429',
-    'downriver': '#012B58',
-    'azure': '#019CFF',
-    'hawkes': '#CCEBFF',
-    'linen': '#F5F4E8',
-    'forest': '#005C3B',
-    'deep-copper': '#801D13',
-    'vermillion': '#E52300',
-    'crusta': '#FF7941',
+    'navy': '#14283C',
+    'spruce': '#2C5148',
+    'snow': '#F7F4F0',
+    'ice': '#BDDAD6',
+    'tennis-ball': '#DEDD54',
+    'artisan': '#DD5B58',
 }
 
-NAV_SEGMENTS = [
-    ('', [('home', 'Home')]),
-    ('People', [('volunteers', 'Volunteers'), ('demographics', 'Demographics')]),
-    ('Ministry', [('ministry', 'Ministry'), ('groups', 'Small Groups')]),
-    ('Admin', [('config', 'Config')]),
+NAV_TABS_TOP = [
+    ('home', 'Home'),
+    ('config', 'Config'),
+]
+NAV_TABS_MAIN = [
+    ('volunteers', 'Volunteers'),
+    ('demographics', 'Demographics'),
+    ('ministry', 'Ministry'),
+    ('groups', 'Small Groups'),
 ]
 
 TITLE_MAP = {
@@ -155,6 +165,31 @@ def _script_path():
     return '/PyScriptForm/' + enc
 
 
+def _url_enc(val):
+    try:
+        return model.UrlEncode(_s(val))
+    except:
+        return _s(val).replace(' ', '%20')
+
+
+def _refresh_href(view):
+    """Reload the current view, keeping list/filter/drill query params."""
+    href = _script_path() + '?view=' + _s(view or 'home')
+    for key in ('drill', 'list', 'grade', 'gender', 'school', 'q', 'group'):
+        val = _s(_form_val(key))
+        if val:
+            href += '&' + key + '=' + _url_enc(val)
+    href += '&refresh=1'
+    return href
+
+
+def _refresh_button(view):
+    return (
+        '<a class="btn-refresh" href="' + _refresh_href(view) + '" title="Reload this page">'
+        '<i class="fa fa-refresh" aria-hidden="true"></i> Refresh</a>'
+    )
+
+
 def _form_val(name, default=''):
     try:
         if model.DataHas(name):
@@ -215,6 +250,30 @@ def _ymd(d):
         return _s(d)[:10]
 
 
+def _date_display(d):
+    """User-facing date: July 1, 2026. Accepts date or parseable value."""
+    if d is None:
+        return ''
+    dt = d
+    if not isinstance(d, datetime.date):
+        dt = _parse_date(d)
+    if dt is None:
+        return ''
+    try:
+        return dt.strftime('%B ') + str(int(dt.day)) + ', ' + str(int(dt.year))
+    except:
+        return _ymd(dt)
+
+
+def _md_display(month, day):
+    """Birthday-style date without year: July 1."""
+    try:
+        dt = datetime.date(2000, _i(month), _i(day))
+        return dt.strftime('%B ') + str(int(dt.day))
+    except:
+        return ''
+
+
 def _parse_date(val):
     if _is_null(val):
         return None
@@ -267,8 +326,8 @@ def _default_config():
         'ms_orgid': 0,
         'hs_orgid': 0,
         'week_start_dow': 2,
-        'event_program_id': 0,
-        'event_division_ids': '',
+        'event_program_id': NEXT_GEN_PROGRAM_ID,
+        'event_division_ids': str(EVENT_DIVISION_ID),
         'leaders_orgid': 0,
         'student_leaders_orgid': 0,
         'coaches_orgid': 0,
@@ -278,10 +337,11 @@ def _default_config():
         'kw_decision_scope': 'Refuge Student Ministry',
         'kw_stories': 'Stories of Transformation',
         'baptism_scope': 'standing',
-        'kids_program_id': 0,
-        'awana_program_id': 0,
+        'next_gen_program_id': NEXT_GEN_PROGRAM_ID,
+        'kids_division_id': 0,
+        'awana_division_id': 0,
         'senior_year_orgid': 0,
-        'volunteer_program_id': 0,
+        'volunteer_program_id': VOLUNTEER_PROGRAM_ID,
         'volunteer_extra_orgids': '',
         'view_only_role': '',
         'small_group_names': '',
@@ -375,6 +435,19 @@ def _load_config():
         for k in cfg.keys():
             if k in parsed:
                 cfg[k] = parsed[k]
+        # Legacy keys: Kids/Awana used to be stored as Program Ids
+        if _i(cfg.get('kids_division_id'), 0) <= 0 and _i(parsed.get('kids_program_id'), 0) > 0:
+            cfg['kids_division_id'] = _i(parsed.get('kids_program_id'))
+        if _i(cfg.get('awana_division_id'), 0) <= 0 and _i(parsed.get('awana_program_id'), 0) > 0:
+            cfg['awana_division_id'] = _i(parsed.get('awana_program_id'))
+        if _i(cfg.get('next_gen_program_id'), 0) <= 0:
+            cfg['next_gen_program_id'] = NEXT_GEN_PROGRAM_ID
+        if _i(cfg.get('event_program_id'), 0) <= 0:
+            cfg['event_program_id'] = NEXT_GEN_PROGRAM_ID
+        if not _s(cfg.get('event_division_ids')).strip():
+            cfg['event_division_ids'] = str(EVENT_DIVISION_ID)
+        if _i(cfg.get('volunteer_program_id'), 0) <= 0:
+            cfg['volunteer_program_id'] = VOLUNTEER_PROGRAM_ID
         _CONFIG_LOAD_INFO = status + ' · ' + str(len(raw)) + ' chars'
     else:
         _CONFIG_LOAD_INFO = status + ' · defaults only'
@@ -686,7 +759,7 @@ ORDER BY PersonName
     people = []
     for r in rows:
         rec = _person_row(r)
-        rec['extra'] = _ymd(_parse_date(r.Extra)) if hasattr(r, 'Extra') else ''
+        rec['extra'] = _date_display(r.Extra) if hasattr(r, 'Extra') else ''
         people.append(rec)
     return people
 
@@ -732,7 +805,7 @@ ORDER BY pe.BaptismDate, PersonName
     people = []
     for r in rows:
         rec = _person_row(r)
-        rec['extra'] = _ymd(_parse_date(r.Extra))
+        rec['extra'] = _date_display(r.Extra)
         people.append(rec)
     return people
 
@@ -883,7 +956,12 @@ def _attendance_bundle(cfg):
 
 
 def _event_orgs(cfg):
-    prog = _cfg_i(cfg, 'event_program_id')
+    """Involvements in Next Gen Program (1112) and optional Division(s).
+
+    TouchPoint stores Program/Division on DivOrg + ProgDiv, not only
+    Organizations.DivisionId — OrgSearch uses the same path.
+    """
+    prog = _cfg_i(cfg, 'event_program_id') or NEXT_GEN_PROGRAM_ID
     if prog <= 0:
         return []
     divs = _parse_id_list(cfg.get('event_division_ids'))
@@ -898,13 +976,37 @@ SELECT o.OrganizationId, o.OrganizationName,
 FROM dbo.Organizations o
 LEFT JOIN dbo.Division d ON o.DivisionId = d.Id
 LEFT JOIN dbo.Program p ON d.ProgId = p.Id
-WHERE ISNULL(p.Id, 0) = @prog
+WHERE (
+    EXISTS (
+        SELECT 1
+        FROM dbo.DivOrg do
+        INNER JOIN dbo.ProgDiv pd ON pd.DivId = do.DivId
+        WHERE do.OrgId = o.OrganizationId
+          AND pd.ProgId = @prog
+    )
+    OR EXISTS (
+        SELECT 1
+        FROM dbo.ProgDiv pd
+        WHERE pd.DivId = o.DivisionId
+          AND pd.ProgId = @prog
+    )
+    OR ISNULL(d.ProgId, 0) = @prog
+)
 """
     p = _dd()
     p.AddValue('prog', prog)
     if divs:
         frag, names = _sql_in_int(divs, 'div')
-        sql += ' AND o.DivisionId IN (' + frag + ') '
+        sql += """
+ AND (
+    o.DivisionId IN (""" + frag + """)
+    OR EXISTS (
+        SELECT 1 FROM dbo.DivOrg do2
+        WHERE do2.OrgId = o.OrganizationId
+          AND do2.DivId IN (""" + frag + """)
+    )
+ )
+"""
         _bind_ids(p, names)
     sql += ' ORDER BY ISNULL(o.FirstMeetingDate, o.CreatedDate), o.OrganizationName'
     try:
@@ -920,13 +1022,16 @@ WHERE ISNULL(p.Id, 0) = @prog
         oid = _i(r.OrganizationId)
         if oid in skip:
             continue
-        start = _parse_date(r.FirstMeetingDate) or _parse_date(r.CreatedDate)
+        first = _parse_date(r.FirstMeetingDate)
         last = _parse_date(r.LastMeetingDate)
+        created = _parse_date(r.CreatedDate)
         out.append({
             'id': oid,
             'name': _s(r.OrganizationName),
-            'start': start,
+            'start': first or created,
+            'first': first,
             'last': last,
+            'created': created,
             'member_count': _i(r.MemberCount),
             'division': _s(r.DivisionName),
             'status_id': _i(r.OrganizationStatusId),
@@ -947,15 +1052,77 @@ def _event_is_past(ev, today=None):
 
 
 def _fy_events(cfg):
+    """Ministry-year events: meeting-date overlap, created this FY, or Active with no dates.
+
+    CreatedDate is not treated as a meeting date — orgs built before July 1
+    still appear if they have no First/Last meeting or are still Active.
+    """
     fy_s, fy_e = _fy_bounds()
     evs = []
     for ev in _event_orgs(cfg):
-        start = ev.get('start')
-        if start and start >= fy_s and start < fy_e:
+        first = ev.get('first')
+        last = ev.get('last')
+        created = ev.get('created')
+        status = _i(ev.get('status_id'))
+        if first or last:
+            begins = first or last
+            ends = last or first
+            if begins and begins < fy_e and ends and ends >= fy_s:
+                evs.append(ev)
+            elif begins and fy_s <= begins < fy_e:
+                evs.append(ev)
+            elif last and fy_s <= last < fy_e:
+                evs.append(ev)
+            continue
+        if created and fy_s <= created < fy_e:
             evs.append(ev)
-        elif start is None:
+        elif status == 30:
             evs.append(ev)
     return evs
+
+
+def _event_roster_counts(org_ids):
+    """Leaders vs Members per involvement (MemberType AttendanceType + name)."""
+    ids = [n for n in (org_ids or []) if _i(n) > 0]
+    out = {}
+    for n in ids:
+        out[n] = {'leaders': 0, 'members': 0}
+    if not ids:
+        return out
+    frag, names = _sql_in_int(ids, 'oid')
+    sql = """
+SELECT om.OrganizationId,
+       SUM(CASE
+             WHEN ISNULL(mt.AttendanceTypeId, 0) = 10
+               OR UPPER(LTRIM(RTRIM(ISNULL(mt.Description,'')))) LIKE '%LEADER%'
+             THEN 1 ELSE 0 END) AS LeaderCount,
+       SUM(CASE
+             WHEN ISNULL(mt.AttendanceTypeId, 0) = 10
+               OR UPPER(LTRIM(RTRIM(ISNULL(mt.Description,'')))) LIKE '%LEADER%'
+             THEN 0
+             WHEN ISNULL(mt.AttendanceTypeId, 0) = 30
+               OR UPPER(LTRIM(RTRIM(ISNULL(mt.Description,'')))) LIKE '%MEMBER%'
+             THEN 1 ELSE 0 END) AS MemberCount
+FROM dbo.OrganizationMembers om
+LEFT JOIN lookup.MemberType mt ON mt.Id = om.MemberTypeId
+INNER JOIN dbo.People pe ON pe.PeopleId = om.PeopleId
+WHERE om.OrganizationId IN (""" + frag + """)
+  AND ISNULL(pe.IsDeceased, 0) = 0
+GROUP BY om.OrganizationId
+"""
+    p = _dd()
+    _bind_ids(p, names)
+    try:
+        rows = list(q.QuerySql(sql, p))
+    except Exception, ex:
+        _warn('event roster counts: ' + _ex_msg(ex))
+        return out
+    for r in rows:
+        oid = _i(r.OrganizationId)
+        if oid in out:
+            out[oid]['leaders'] = _i(r.LeaderCount)
+            out[oid]['members'] = _i(r.MemberCount)
+    return out
 
 
 def _event_enrollments(cfg, events):
@@ -1031,16 +1198,18 @@ ORDER BY pe.BirthDay, PersonName
     out = []
     for r in rows:
         rec = _person_row(r)
-        rec['extra'] = str(_i(r.BirthMonth)) + '/' + str(_i(r.BirthDay))
+        rec['extra'] = _md_display(_i(r.BirthMonth), _i(r.BirthDay))
         out.append(rec)
     return out
 
 
-def _people_on_programs(prog_ids):
-    prog_ids = [n for n in (prog_ids or []) if _i(n) > 0]
-    if not prog_ids:
+def _people_on_divisions(div_ids, prog_id=0):
+    """Current members of involvements in these Divisions (Next Gen Program 1112)."""
+    div_ids = [n for n in (div_ids or []) if _i(n) > 0]
+    if not div_ids:
         return []
-    frag, names = _sql_in_int(prog_ids, 'prg')
+    frag, names = _sql_in_int(div_ids, 'div')
+    prog_id = _i(prog_id, 0) or NEXT_GEN_PROGRAM_ID
     sql = """
 SELECT DISTINCT
     pe.PeopleId,
@@ -1057,16 +1226,18 @@ FROM dbo.OrganizationMembers om
 INNER JOIN dbo.Organizations o ON o.OrganizationId = om.OrganizationId
 LEFT JOIN dbo.Division d ON o.DivisionId = d.Id
 """ + _sql_person_joins() + """
-WHERE ISNULL(d.ProgId, 0) IN (""" + frag + """)
+WHERE o.DivisionId IN (""" + frag + """)
+  AND ISNULL(d.ProgId, 0) = @prog
   AND ISNULL(pe.IsDeceased, 0) = 0
 ORDER BY PersonName
 """
     p = _dd()
     _bind_ids(p, names)
+    p.AddValue('prog', prog_id)
     try:
         rows = list(q.QuerySql(sql, p))
     except Exception, ex:
-        _warn('program people: ' + _ex_msg(ex))
+        _warn('division people: ' + _ex_msg(ex))
         return []
     return [_person_row(r) for r in rows]
 
@@ -1086,11 +1257,25 @@ def _grade_key(label):
     return 0
 
 
+def _sql_org_in_program(org_alias, div_alias, prog_param):
+    """Org is under a Program via DivOrg + ProgDiv, or Division.ProgId."""
+    return (
+        '(EXISTS (SELECT 1 FROM dbo.DivOrg do_vp '
+        'INNER JOIN dbo.ProgDiv pd_vp ON pd_vp.DivId = do_vp.DivId '
+        'WHERE do_vp.OrgId = ' + org_alias + '.OrganizationId '
+        'AND pd_vp.ProgId = ' + prog_param + ') '
+        'OR EXISTS (SELECT 1 FROM dbo.ProgDiv pd_vp2 '
+        'WHERE pd_vp2.DivId = ' + org_alias + '.DivisionId '
+        'AND pd_vp2.ProgId = ' + prog_param + ') '
+        'OR ISNULL(' + div_alias + '.ProgId, 0) = ' + prog_param + ')'
+    )
+
+
 def _serving_outside(cfg):
     standing = _standing_orgs(cfg)
     if not standing:
         return []
-    vol_prog = _cfg_i(cfg, 'volunteer_program_id')
+    vol_prog = _cfg_i(cfg, 'volunteer_program_id') or VOLUNTEER_PROGRAM_ID
     extra = _parse_id_list(cfg.get('volunteer_extra_orgids'))
     if vol_prog <= 0 and not extra:
         return []
@@ -1100,12 +1285,13 @@ def _serving_outside(cfg):
     _bind_ids(p, st_names)
     if extra:
         ex_frag, ex_names = _sql_in_int(extra, 'ex')
-        extra_sql = ' OR om2.OrganizationId IN (' + ex_frag + ') '
+        extra_sql = ' OR o2.OrganizationId IN (' + ex_frag + ') '
         _bind_ids(p, ex_names)
     prog_sql = '1=0'
     if vol_prog > 0:
-        prog_sql = 'ISNULL(d2.ProgId, 0) = @vprog'
+        prog_sql = _sql_org_in_program('o2', 'd2', '@vprog')
         p.AddValue('vprog', vol_prog)
+    match_sql = '(' + prog_sql + extra_sql + ')'
     sql = """
 SELECT DISTINCT
     pe.PeopleId,
@@ -1113,7 +1299,18 @@ SELECT DISTINCT
     pe.FirstName, pe.LastName, pe.Age,
     ISNULL(pe.SchoolOther, '') AS SchoolOther,
     CASE pe.GenderId WHEN 1 THEN 'Male' WHEN 2 THEN 'Female' ELSE 'Unknown' END AS GenderLabel,
-    ISNULL(gl.Description, 'Unknown') AS GradeLabel
+    ISNULL(gl.Description, 'Unknown') AS GradeLabel,
+    ISNULL(STUFF((
+        SELECT ', ' + o2.OrganizationName
+        FROM dbo.OrganizationMembers om2
+        INNER JOIN dbo.Organizations o2 ON o2.OrganizationId = om2.OrganizationId
+        LEFT JOIN dbo.Division d2 ON o2.DivisionId = d2.Id
+        WHERE om2.PeopleId = pe.PeopleId
+          AND om2.OrganizationId NOT IN (""" + st_frag + """)
+          AND """ + match_sql + """
+        ORDER BY o2.OrganizationName
+        FOR XML PATH(''), TYPE
+    ).value('.', 'nvarchar(max)'), 1, 2, ''), '') AS Extra
 FROM dbo.OrganizationMembers om
 INNER JOIN dbo.People pe ON pe.PeopleId = om.PeopleId
 LEFT JOIN lookup.GradeLevel gl ON pe.GradeLevelId = gl.Id
@@ -1126,7 +1323,7 @@ WHERE om.OrganizationId IN (""" + st_frag + """)
       LEFT JOIN dbo.Division d2 ON o2.DivisionId = d2.Id
       WHERE om2.PeopleId = om.PeopleId
         AND om2.OrganizationId NOT IN (""" + st_frag + """)
-        AND (""" + prog_sql + extra_sql + """)
+        AND """ + match_sql + """
   )
 ORDER BY PersonName
 """
@@ -1228,15 +1425,16 @@ def _save_config_from_form(cfg):
         'event_division_ids', 'leaders_orgid', 'student_leaders_orgid',
         'coaches_orgid', 'onboarding_url', 'involvement_dash_url',
         'kw_decision', 'kw_decision_scope', 'kw_stories', 'baptism_scope',
-        'kids_program_id', 'awana_program_id', 'senior_year_orgid',
+        'next_gen_program_id', 'kids_division_id', 'awana_division_id',
+        'senior_year_orgid',
         'volunteer_program_id', 'volunteer_extra_orgids', 'view_only_role',
         'small_group_names', 'header_logo_url',
     ]
     int_keys = {
         'ms_orgid', 'hs_orgid', 'week_start_dow', 'event_program_id',
         'leaders_orgid', 'student_leaders_orgid', 'coaches_orgid',
-        'kids_program_id', 'awana_program_id', 'senior_year_orgid',
-        'volunteer_program_id',
+        'next_gen_program_id', 'kids_division_id', 'awana_division_id',
+        'senior_year_orgid', 'volunteer_program_id',
     }
     for k in keys:
         val = _form_val(k, _s(cfg.get(k)))
@@ -1423,7 +1621,7 @@ def _unique_values(people, key):
     return out
 
 
-def _roster_table(people, extra_label='', can_write=False, tag_suggest='Student Ministry', show_groups=False, show_extra=False, checkboxes=False):
+def _roster_table(people, extra_label='', can_write=False, tag_suggest='Student Ministry', show_groups=False, show_extra=False, checkboxes=False, show_grade=True, show_school=True):
     n = 0
     try:
         n = len(people)
@@ -1437,16 +1635,19 @@ def _roster_table(people, extra_label='', can_write=False, tag_suggest='Student 
     if checkboxes:
         html += '<th class="sm-check"><input type="checkbox" class="sm-check-all" title="Select all" /></th>'
     html += '<th class="sm-sort" data-sort="text">Name</th>'
-    html += '<th class="sm-sort" data-sort="text">Grade</th>'
+    if show_grade:
+        html += '<th class="sm-sort" data-sort="text">Grade</th>'
     html += '<th class="sm-sort" data-sort="text">Gender</th>'
     html += '<th class="sm-sort" data-sort="num">Age</th>'
-    html += '<th class="sm-sort" data-sort="text">School</th>'
+    if show_school:
+        html += '<th class="sm-sort" data-sort="text">School</th>'
     if show_groups:
         html += '<th class="sm-sort" data-sort="text">Groups</th>'
     if show_extra:
         html += '<th class="sm-sort" data-sort="text">' + _html(extra_label or 'Detail') + '</th>'
     html += '</tr></thead><tbody>'
-    cols = 5 + (1 if checkboxes else 0) + (1 if show_groups else 0) + (1 if show_extra else 0)
+    cols = 3 + (1 if checkboxes else 0) + (1 if show_grade else 0) + (1 if show_school else 0)
+    cols += (1 if show_groups else 0) + (1 if show_extra else 0)
     if not people:
         html += '<tr><td colspan="' + str(cols) + '"><div class="empty-state">No people</div></td></tr>'
     for p in people or []:
@@ -1454,10 +1655,12 @@ def _roster_table(people, extra_label='', can_write=False, tag_suggest='Student 
         if checkboxes:
             html += '<td><input type="checkbox" class="sm-row-check" name="pid" value="' + str(_i(p.get('people_id'))) + '" /></td>'
         html += '<td>' + _person_link(p) + '</td>'
-        html += '<td>' + _html(p.get('grade')) + '</td>'
+        if show_grade:
+            html += '<td>' + _html(p.get('grade')) + '</td>'
         html += '<td>' + _html(p.get('gender')) + '</td>'
         html += '<td>' + _html(p.get('age')) + '</td>'
-        html += '<td>' + _html(p.get('school')) + '</td>'
+        if show_school:
+            html += '<td>' + _html(p.get('school')) + '</td>'
         if show_groups:
             html += '<td>' + _html(p.get('groups')) + '</td>'
         if show_extra:
@@ -1511,32 +1714,27 @@ def _header_hero_html(cfg):
     return html
 
 
+def _nav_tabs_html(view, tabs, is_admin):
+    html = ''
+    for key, label in tabs:
+        if key == 'config' and not is_admin:
+            continue
+        cls = 'dash-tab' + (' active' if key == view else '')
+        html += '<a class="' + cls + '" href="' + _script_path() + '?view=' + key + '">' + _html(label) + '</a>'
+    return html
+
+
 def _nav(view, is_admin):
     html = '<nav class="dash-nav" id="sm-dash-nav" aria-label="' + _html(APP_TITLE) + '">'
     html += '<button type="button" class="dash-nav-caret" id="sm-nav-caret" aria-expanded="true" title="Collapse menu">'
     html += '<i class="fa fa-caret-up" aria-hidden="true"></i></button>'
     html += '<div class="dash-nav-body">'
-    for seg_label, tabs in NAV_SEGMENTS:
-        links = []
-        for key, label in tabs:
-            if key == 'config' and not is_admin:
-                continue
-            cls = 'dash-tab' + (' active' if key == view else '')
-            links.append('<a class="' + cls + '" href="' + _script_path() + '?view=' + key + '">' + _html(label) + '</a>')
-        if not links:
-            continue
-        seg_cls = 'seg-home'
-        low = _s(seg_label).lower()
-        if low == 'people':
-            seg_cls = 'seg-people'
-        elif low == 'ministry':
-            seg_cls = 'seg-ops'
-        elif low == 'admin':
-            seg_cls = 'seg-admin'
-        html += '<div class="dash-nav-segment ' + seg_cls + '">'
-        if seg_label:
-            html += '<span class="dash-nav-label">' + _html(seg_label) + '</span>'
-        html += '<div class="dash-tabs">' + ''.join(links) + '</div></div>'
+    html += '<div class="dash-nav-segment"><div class="dash-tabs">'
+    html += _nav_tabs_html(view, NAV_TABS_TOP, is_admin)
+    html += '</div></div>'
+    html += '<div class="dash-nav-segment"><div class="dash-tabs">'
+    html += _nav_tabs_html(view, NAV_TABS_MAIN, is_admin)
+    html += '</div></div>'
     html += '</div></nav>'
     return html
 
@@ -1553,33 +1751,59 @@ def _view_home(cfg, can_write):
     baptisms = _baptism_people(cfg)
     events = _fy_events(cfg)
     uniq, raw, enroll_people = _event_enrollments(cfg, events)
+    roster_counts = _event_roster_counts([ev['id'] for ev in events])
     html = '<div class="cover-head"><h2>Home</h2>'
-    html += '<p class="meta-line">Ministry year ' + _html(_ymd(fy_s)) + ' – ' + _html(_ymd(_add_days(fy_e, -1))) + '</p></div>'
+    html += '<p class="meta-line">Ministry year ' + _html(_date_display(fy_s)) + ' – ' + _html(_date_display(_add_days(fy_e, -1))) + '</p></div>'
 
-    html += '<div class="stats-grid">'
-    html += '<a class="stat-card" href="' + _script_path() + '?view=home&drill=decisions">'
+    html += '<div class="home-band home-combo-1">'
+    html += '<div class="stats-grid home-row home-row-hero">'
+    html += '<a class="stat-card stat-hero" href="' + _script_path() + '?view=home&drill=decisions">'
     html += '<div class="stat-value">' + str(len(decisions)) + '</div>'
     html += '<div class="stat-label">Decisions (FY)</div></a>'
-    html += '<a class="stat-card" href="' + _script_path() + '?view=home&drill=baptisms">'
+    html += '<a class="stat-card stat-hero" href="' + _script_path() + '?view=home&drill=baptisms">'
     html += '<div class="stat-value">' + str(len(baptisms)) + '</div>'
     html += '<div class="stat-label">Baptisms (FY)</div></a>'
+    html += '</div></div>'
+
+    today = _today()
+    month_name = today.strftime('%B')
+    prev_m = today.month - 1
+    prev_y = today.year
+    if prev_m < 1:
+        prev_m = 12
+        prev_y -= 1
+    last_month_name = datetime.date(prev_y, prev_m, 1).strftime('%B')
+    html += '<div class="home-band home-combo-2">'
+    html += '<div class="home-row">'
+    html += '<h3 class="home-row-title">Attendance</h3>'
+    html += '<div class="stats-grid home-row-att">'
     html += '<a class="stat-card" href="' + _script_path() + '?view=home&drill=attendance">'
     html += '<div class="stat-value">' + str(att['this_week']) + '</div>'
     html += '<div class="stat-label">This week present</div>'
     html += '<div class="stat-sub">WoW ' + _delta_html(att['wow']) + ' · LY week ' + _delta_html(att['yoy_week']) + '</div></a>'
+    html += '<div class="home-month-col">'
+    html += '<h4 class="home-month-title">' + _html(last_month_name) + '</h4>'
+    html += '<div class="stat-card">'
+    html += '<div class="stat-value">' + ('%.1f' % float(att['last_month_avg'])) + '</div>'
+    html += '<div class="stat-label">Last month avg attendance</div>'
+    html += '<div class="stat-sub">' + str(_i(att.get('last_month_weeks'))) + ' weeks</div></div>'
+    html += '</div>'
+    html += '<div class="home-month-col">'
+    html += '<h4 class="home-month-title">' + _html(month_name) + '</h4>'
     html += '<div class="stat-card">'
     html += '<div class="stat-value">' + ('%.1f' % float(att['month_avg'])) + '</div>'
     html += '<div class="stat-label">Month avg attendance</div>'
     html += '<div class="stat-sub">vs last mo ' + _delta_html(att['month_delta'], 'float')
     html += ' · vs LY ' + _delta_html(att['month_yoy'], 'float') + '</div></div>'
-    html += '<div class="stat-card"><div class="stat-value">' + str(len(events)) + '</div>'
-    html += '<div class="stat-label">Events since July 1</div></div>'
-    html += '<a class="stat-card" href="' + _script_path() + '?view=home&drill=enroll_unique">'
-    html += '<div class="stat-value">' + str(uniq) + '</div>'
-    html += '<div class="stat-label">Unique event enrollments</div></a>'
-    html += '<a class="stat-card" href="' + _script_path() + '?view=home&drill=enroll_raw">'
-    html += '<div class="stat-value">' + str(raw) + '</div>'
-    html += '<div class="stat-label">Raw event enrollments</div></a>'
+    html += '</div></div>'
+    html += '<p class="meta-line">Week of ' + _html(_date_display(att['week_start'])) + ' – ' + _html(_date_display(att['week_end']))
+    html += ' · last week ' + str(att['last_week']) + ' · last year week ' + str(att['last_year_week']) + '</p>'
+    html += '</div></div>'
+
+    html += '<div class="home-band home-combo-1">'
+    html += '<div class="home-row">'
+    html += '<h3 class="home-row-title">Leaders</h3>'
+    html += '<div class="stats-grid home-row-leaders">'
     html += '<a class="stat-card" href="' + _script_path() + '?view=volunteers&list=leaders">'
     html += '<div class="stat-value">' + str(_org_member_count(_cfg_i(cfg, 'leaders_orgid'))) + '</div>'
     html += '<div class="stat-label">Volunteer leaders</div></a>'
@@ -1589,10 +1813,21 @@ def _view_home(cfg, can_write):
     html += '<a class="stat-card" href="' + _script_path() + '?view=volunteers&list=coaches">'
     html += '<div class="stat-value">' + str(_org_member_count(_cfg_i(cfg, 'coaches_orgid'))) + '</div>'
     html += '<div class="stat-label">Small Group Coaches</div></a>'
-    html += '</div>'
+    html += '</div></div></div>'
 
-    html += '<p class="meta-line">Week of ' + _html(_ymd(att['week_start'])) + ' – ' + _html(_ymd(att['week_end']))
-    html += ' · last week ' + str(att['last_week']) + ' · last year week ' + str(att['last_year_week']) + '</p>'
+    html += '<div class="home-band home-combo-1">'
+    html += '<div class="home-row">'
+    html += '<h3 class="home-row-title">Events</h3>'
+    html += '<div class="stats-grid home-row-events">'
+    html += '<div class="stat-card"><div class="stat-value">' + str(len(events)) + '</div>'
+    html += '<div class="stat-label">Events since July 1</div></div>'
+    html += '<a class="stat-card" href="' + _script_path() + '?view=home&drill=enroll_unique">'
+    html += '<div class="stat-value">' + str(uniq) + '</div>'
+    html += '<div class="stat-label">Unique event enrollments</div></a>'
+    html += '<a class="stat-card" href="' + _script_path() + '?view=home&drill=enroll_raw">'
+    html += '<div class="stat-value">' + str(raw) + '</div>'
+    html += '<div class="stat-label">Raw event enrollments</div></a>'
+    html += '</div></div>'
 
     dash = _s(cfg.get('involvement_dash_url')) or '/PyScriptForm/InvolvementDashboard'
     html += '<div class="vbs-card"><h3>Ministry-year events</h3>'
@@ -1600,11 +1835,11 @@ def _view_home(cfg, can_write):
     html += '<div class="table-scroll"><table class="people-table sm-sortable"><thead><tr>'
     html += '<th class="sm-sort" data-sort="text">Event</th>'
     html += '<th class="sm-sort" data-sort="text">When</th>'
-    html += '<th class="sm-sort" data-sort="text">Division</th>'
-    html += '<th class="sm-sort" data-sort="num">Enrolled</th>'
+    html += '<th class="sm-sort" data-sort="num">Leaders</th>'
+    html += '<th class="sm-sort" data-sort="num">Members</th>'
     html += '<th></th></tr></thead><tbody>'
     if not events:
-        html += '<tr><td colspan="5"><div class="empty-state">No FY events yet. Set Program Id on Config.</div></td></tr>'
+        html += '<tr><td colspan="5"><div class="empty-state">No events in Program 1112 / Division 46 this ministry year. Confirm those Ids on Config, then Refresh.</div></td></tr>'
     upcoming = []
     past = []
     for ev in events:
@@ -1614,17 +1849,18 @@ def _view_home(cfg, can_write):
             upcoming.append(ev)
     for ev in upcoming + past:
         past_cls = ' event-past' if _event_is_past(ev) else ' event-upcoming'
-        when = _ymd(ev.get('start')) or '—'
+        when = _date_display(ev.get('start')) or '—'
         if ev.get('last'):
-            when = when + ' – ' + _ymd(ev.get('last'))
+            when = when + ' – ' + _date_display(ev.get('last'))
+        counts = roster_counts.get(ev['id']) or {}
         html += '<tr class="' + past_cls + '">'
         html += '<td><a href="/Org/' + str(ev['id']) + '" target="_blank" rel="noopener">' + _html(ev['name']) + '</a></td>'
         html += '<td>' + _html(when) + '</td>'
-        html += '<td>' + _html(ev.get('division')) + '</td>'
-        html += '<td>' + str(_i(ev.get('member_count'))) + '</td>'
+        html += '<td>' + str(_i(counts.get('leaders'))) + '</td>'
+        html += '<td>' + str(_i(counts.get('members'))) + '</td>'
         html += '<td><a class="icon-btn" title="Involvement Dashboard" href="' + _html(dash) + '?org_id=' + str(ev['id'])
         html += '" target="_blank" rel="noopener"><i class="fa fa-bar-chart"></i></a></td></tr>'
-    html += '</tbody></table></div></div>'
+    html += '</tbody></table></div></div></div>'
 
     drill = _s(_form_val('drill'))
     if drill == 'decisions':
@@ -1686,7 +1922,9 @@ def _view_volunteers(cfg, can_write):
     if not current[2]:
         html += '<div class="empty-state">Set this Involvement # on the Config tab.</div>'
     else:
-        html += _roster_table(people, '', can_write, 'SM ' + current[1], True, False)
+        show_gs = which == 'students'
+        html += _roster_table(
+            people, '', can_write, 'SM ' + current[1], True, False, False, show_gs, show_gs)
     html += '</div>'
     return html
 
@@ -1780,12 +2018,12 @@ def _view_ministry(cfg, can_write):
     decisions = _people_with_keywords(
         [_s(cfg.get('kw_decision')), _s(cfg.get('kw_decision_scope'))], True, cfg)
     standing = _org_members(_standing_orgs(cfg))
-    kids_progs = []
-    for k in ('kids_program_id', 'awana_program_id'):
+    kids_divs = []
+    for k in ('kids_division_id', 'awana_division_id'):
         n = _cfg_i(cfg, k)
         if n > 0:
-            kids_progs.append(n)
-    kids_people = _people_on_programs(kids_progs)
+            kids_divs.append(n)
+    kids_people = _people_on_divisions(kids_divs, _cfg_i(cfg, 'next_gen_program_id'))
     sixth = []
     for p in standing:
         if _grade_key(p.get('grade')) == 6:
@@ -1840,8 +2078,9 @@ def _view_ministry(cfg, can_write):
     html += '<div class="vbs-card"><h3>Current 6th grade (Refuge)</h3>'
     html += _roster_table(sixth, '', can_write, 'SM 6th', True, False) + '</div>'
     html += '<div class="vbs-card"><h3>Students serving outside Refuge</h3>'
-    html += '<p class="meta-line">Refuge + Volunteer Program (or extra Org#s). Audit the allow-list on Config.</p>'
-    html += _roster_table(serving, '', can_write, 'SM Serving', True, False) + '</div>'
+    html += '<p class="meta-line">Refuge standing members who are also in Volunteer Program '
+    html += str(VOLUNTEER_PROGRAM_ID) + ' (or extra Org#s). Volunteer involvements are listed per student.</p>'
+    html += _roster_table(serving, 'Volunteer involvements', can_write, 'SM Serving', True, True) + '</div>'
     return html
 
 
@@ -1951,8 +2190,8 @@ def _view_config(cfg):
     html += _cfg_field(cfg, 'week_start_dow', 'Week start (0=Mon … 6=Sun)', 'Default 2 = Wednesday')
     html += '</div>'
     html += '<div class="vbs-card"><h3>Events (Prog/Div)</h3>'
-    html += _cfg_field(cfg, 'event_program_id', 'Student Ministry Program Id')
-    html += _cfg_field(cfg, 'event_division_ids', 'Division Ids (comma-separated, optional)')
+    html += _cfg_field(cfg, 'event_program_id', 'Next Generation Program Id', 'FCC default 1112 — all Next Gen')
+    html += _cfg_field(cfg, 'event_division_ids', 'Event Division Ids (comma-separated)', 'FCC default 46')
     html += '</div>'
     html += '<div class="vbs-card"><h3>Leader involvements</h3>'
     html += _cfg_field(cfg, 'leaders_orgid', 'Volunteer Leaders Org#')
@@ -1968,10 +2207,11 @@ def _view_config(cfg):
     html += _cfg_field(cfg, 'baptism_scope', 'Baptism scope', 'standing = MS/HS members only')
     html += '</div>'
     html += '<div class="vbs-card"><h3>Ministry comparisons</h3>'
-    html += _cfg_field(cfg, 'kids_program_id', 'Faith Kids Program Id')
-    html += _cfg_field(cfg, 'awana_program_id', 'Awana Program Id')
+    html += _cfg_field(cfg, 'next_gen_program_id', 'Next Generation Program Id', 'Always 1112 at FCC')
+    html += _cfg_field(cfg, 'kids_division_id', 'Faith Kids Division Id')
+    html += _cfg_field(cfg, 'awana_division_id', 'Awana Division Id')
     html += _cfg_field(cfg, 'senior_year_orgid', 'Senior Year Org# (0 = placeholder)')
-    html += _cfg_field(cfg, 'volunteer_program_id', 'Volunteer Program Id (serving outside)')
+    html += _cfg_field(cfg, 'volunteer_program_id', 'Volunteer Program Id (serving outside)', 'FCC default 1120')
     html += _cfg_field(cfg, 'volunteer_extra_orgids', 'Extra volunteer Org#s (comma-separated)')
     html += _cfg_field(cfg, 'view_only_role', 'View Only role name')
     html += _cfg_field(cfg, 'small_group_names', 'Known small group names (comma-separated)')
@@ -2006,99 +2246,151 @@ def _view_body(view, cfg, can_write):
 
 
 def _css():
-    bp = BRAND['black-pearl']
-    dr = BRAND['downriver']
-    az = BRAND['azure']
-    hk = BRAND['hawkes']
-    ln = BRAND['linen']
-    fo = BRAND['forest']
-    vm = BRAND['vermillion']
+    ny = BRAND['navy']
+    sp = BRAND['spruce']
+    sn = BRAND['snow']
+    ic = BRAND['ice']
+    tb = BRAND['tennis-ball']
+    ar = BRAND['artisan']
     return (
         '.sm-root{display:block!important;visibility:visible!important;max-width:1400px;margin:0 auto;'
         'padding:20px;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;'
-        'background:#f5f5f5!important;color:#1e293b!important;min-height:240px}'
-        '.dashboard-header{background:' + dr + ';color:#fff!important;padding:18px 24px 16px;border-radius:12px;'
-        'margin:0 auto 12px auto;box-shadow:0 4px 15px rgba(1,43,88,.35);text-align:center;max-width:960px}'
+        'background:' + sn + '!important;color:' + ny + '!important;min-height:240px}'
+        '.dashboard-header{background:' + ny + ';color:#fff!important;padding:18px 24px 16px;border-radius:12px;'
+        'margin:0 auto 12px auto;box-shadow:0 4px 15px rgba(20,40,60,.35);text-align:center;max-width:960px}'
         '.sm-header-hero{text-align:center;margin:0 0 8px 0;line-height:0}'
         '.sm-header-hero img{display:block;margin:0 auto;max-height:110px;max-width:min(92%,720px);'
         'width:auto;height:auto;object-fit:contain}'
         '.dashboard-header h1{margin:0 0 4px;font-size:18px;font-weight:600;color:#fff!important}'
-        '.role-pill{display:inline-block;margin-top:8px;padding:3px 10px;border-radius:12px;font-size:11px;'
+        '.hdr-actions{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:8px;flex-wrap:wrap}'
+        '.role-pill{display:inline-block;padding:3px 10px;border-radius:12px;font-size:11px;'
         'font-weight:600;background:rgba(255,255,255,.2);border:1px solid rgba(255,255,255,.35)}'
-        '.dash-nav{text-align:center;margin:0 0 14px;background:#fff;border:1px solid #e2e8f0;border-radius:10px;'
-        'padding:8px 28px 8px 10px;box-shadow:0 1px 4px rgba(0,0,0,.04);position:relative}'
+        '.btn-refresh{display:inline-block;padding:4px 12px;border-radius:12px;font-size:12px;font-weight:700;'
+        'background:#fff;color:' + ny + '!important;text-decoration:none!important;'
+        'border:1px solid rgba(255,255,255,.55)}'
+        '.btn-refresh:hover{background:' + ic + '}'
+        '.dash-nav{text-align:center;margin:0 0 14px;background:#fff;border:1px solid ' + ic + ';border-radius:10px;'
+        'padding:8px 10px;box-shadow:0 1px 4px rgba(20,40,60,.06);position:relative}'
         '.dash-nav-caret{position:absolute;top:4px;right:6px;width:22px;height:22px;border:none;background:transparent;'
-        'color:#64748b;cursor:pointer}'
+        'color:' + sp + ';cursor:pointer}'
         '.dash-nav.is-collapsed .dash-nav-body{display:none!important}'
+        '.dash-nav-body,.dash-nav-segment,.dash-tabs{text-align:center;justify-content:center}'
         '.dash-nav-segment{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:4px 6px;margin:0 0 4px}'
-        '.dash-nav-label{font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:#64748b;margin-right:4px}'
-        '.dash-tab{display:inline-block;border:1px solid #e2e8f0;background:#fff;color:#475569!important;padding:4px 10px;'
+        '.dash-tab{display:inline-block;border:1px solid ' + ic + ';background:#fff;color:' + sp + '!important;padding:4px 10px;'
         'border-radius:6px;font-weight:600;font-size:12px;text-decoration:none!important;margin:1px 2px}'
-        '.dash-tab:hover{border-color:' + az + ';color:' + dr + '!important}'
-        '.dash-tab.active{border-color:' + dr + ';background:' + dr + ';color:#fff!important}'
-        '.dash-nav-segment.seg-people .dash-tab.active{border-color:' + az + ';background:' + az + '}'
-        '.dash-nav-segment.seg-ops .dash-tab.active{border-color:' + fo + ';background:' + fo + '}'
-        '.dash-nav-segment.seg-admin .dash-tab.active{border-color:' + bp + ';background:' + bp + '}'
+        '.dash-tab:hover{border-color:' + sp + ';color:' + ny + '!important}'
+        '.dash-tab.active{border-color:' + ny + ';background:' + ny + ';color:#fff!important}'
         '.subtabs{margin:0 0 12px}'
-        '.cover-head h2{margin:0 0 4px;color:' + bp + '}'
-        '.meta-line{color:#64748b;font-size:13px;margin:4px 0 10px}'
+        '.cover-head h2{margin:0 0 4px;color:' + ny + '}'
+        '.meta-line{color:' + sp + ';font-size:13px;margin:4px 0 10px}'
         '.stats-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin:0 0 16px}'
         '.stats-grid.compact{grid-template-columns:repeat(auto-fill,minmax(120px,1fr))}'
-        '.stat-card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:12px 14px;box-shadow:0 1px 4px rgba(0,0,0,.04);'
+        '.home-row{margin:0 0 20px}'
+        '.home-band{padding:16px 16px 10px;border-radius:12px;margin:0 0 14px}'
+        '.home-band .home-row{margin:0 0 8px}'
+        '.home-band .vbs-card{margin:0}'
+        '.home-combo-1{background:' + ic + '}'
+        '.home-combo-1 .home-row-title,.home-combo-1 .home-month-title,'
+        '.home-combo-1 .stat-value,.home-combo-1 .vbs-card h3{color:' + ny + '}'
+        '.home-combo-1 .stat-label,.home-combo-1 .stat-sub,.home-combo-1 .meta-line,'
+        '.home-combo-1 .people-table a,.home-combo-1 .delta-up{color:' + sp + '}'
+        '.home-combo-1 .stat-card.link-card:hover,.home-combo-1 a.stat-card:hover{border-color:' + tb + '}'
+        '.home-combo-1 tr.event-upcoming td:first-child{border-left:4px solid ' + tb + '}'
+        '.home-combo-2{background:' + sn + '}'
+        '.home-combo-2 .home-row-title,.home-combo-2 .home-month-title,'
+        '.home-combo-2 .stat-value,.home-combo-2 .stat-label,.home-combo-2 .stat-sub,'
+        '.home-combo-2 .meta-line,.home-combo-2 .vbs-card h3{color:' + ny + '}'
+        '.home-combo-2 .stat-card{border-color:' + ic + '}'
+        '.home-combo-2 .stat-card.link-card:hover,.home-combo-2 a.stat-card:hover{border-color:' + ar + '}'
+        '.home-combo-2 .delta-down{color:' + ar + '}'
+        '.home-combo-2 .delta-up{color:' + ny + '}'
+        '.home-row-title{margin:0 0 8px;color:' + ny + ';font-size:16px}'
+        '.home-row-hero{grid-template-columns:1fr 1fr;gap:12px;margin:0 0 20px}'
+        '.home-row-att{grid-template-columns:1fr 1fr 1fr;align-items:end}'
+        '.home-month-col{display:flex;flex-direction:column;min-width:0}'
+        '.home-month-title{margin:0 0 6px;color:' + ny + ';font-size:18px;font-weight:700}'
+        '.home-row-events,.home-row-leaders{grid-template-columns:repeat(3,1fr)}'
+        '.stat-card{background:#fff;border:1px solid ' + ic + ';border-radius:10px;padding:12px 14px;box-shadow:0 1px 4px rgba(20,40,60,.04);'
         'text-decoration:none!important;color:inherit!important;display:block}'
-        '.stat-card.link-card:hover{border-color:' + az + '}'
-        '.stat-value{font-size:28px;font-weight:700;color:' + dr + ';line-height:1.1}'
-        '.stat-label{font-size:12px;font-weight:600;color:#475569;margin-top:4px}'
-        '.stat-sub{font-size:11px;color:#64748b;margin-top:4px}'
-        '.delta-up{color:' + fo + ';font-weight:700}'
-        '.delta-down{color:' + vm + ';font-weight:700}'
-        '.delta-flat{color:#64748b;font-weight:600}'
-        '.vbs-card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:16px;margin:0 0 16px;'
-        'box-shadow:0 1px 4px rgba(0,0,0,.04)}'
-        '.vbs-card h3{margin:0 0 8px;color:' + bp + ';font-size:18px}'
+        '.stat-card.stat-hero{padding:28px 20px;text-align:center}'
+        '.stat-card.stat-hero .stat-value{font-size:52px}'
+        '.stat-card.stat-hero .stat-label{font-size:16px;margin-top:8px}'
+        '.stat-card.link-card:hover{border-color:' + ic + '}'
+        '.stat-value{font-size:28px;font-weight:700;color:' + ny + ';line-height:1.1}'
+        '.stat-label{font-size:12px;font-weight:600;color:' + sp + ';margin-top:4px}'
+        '.stat-sub{font-size:11px;color:' + sp + ';margin-top:4px}'
+        '.delta-up{color:' + sp + ';font-weight:700}'
+        '.delta-down{color:' + ar + ';font-weight:700}'
+        '.delta-flat{color:' + sp + ';font-weight:600}'
+        '.vbs-card{background:#fff;border:1px solid ' + ic + ';border-radius:12px;padding:16px;margin:0 0 16px;'
+        'box-shadow:0 1px 4px rgba(20,40,60,.04)}'
+        '.vbs-card h3{margin:0 0 8px;color:' + ny + ';font-size:18px}'
         '.people-table{width:100%;border-collapse:collapse;font-size:13px}'
-        '.people-table th,.people-table td{padding:7px 8px;border-bottom:1px solid #e2e8f0;text-align:left}'
-        '.people-table th{background:' + ln + ';color:' + bp + ';font-size:12px}'
+        '.people-table th,.people-table td{padding:7px 8px;border-bottom:1px solid ' + ic + ';text-align:left}'
+        '.people-table th{background:' + sn + ';color:' + ny + ';font-size:12px}'
         '.sm-sort{cursor:pointer}'
-        '.people-table a{color:' + az + ';font-weight:600;text-decoration:none}'
+        '.people-table a{color:' + sp + ';font-weight:600;text-decoration:none}'
         '.people-table a:hover{text-decoration:underline}'
         '.table-scroll{overflow-x:auto}'
-        '.empty-state{padding:16px;color:#64748b;text-align:center}'
+        '.empty-state{padding:16px;color:' + sp + ';text-align:center}'
         '.list-actions{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:0 0 8px;flex-wrap:wrap}'
-        '.btn-primary,.btn-secondary,.btn-tag-add,.btn-tag-confirm{border:none;border-radius:8px;padding:8px 14px;'
-        'font-weight:700;cursor:pointer;font-size:13px;text-decoration:none!important;display:inline-block}'
-        '.btn-primary,.btn-tag-confirm{background:' + dr + ';color:#fff!important}'
-        '.btn-secondary{background:#fff;color:' + dr + '!important;border:1px solid #cbd5e1}'
-        '.btn-tag-add{background:' + hk + ';color:' + dr + '!important}'
-        '.icon-btn{color:' + az + ';font-size:16px;padding:4px}'
-        'tr.event-upcoming td:first-child a{color:' + az + '}'
-        'tr.event-past{color:#94a3b8}'
-        'tr.event-past a{color:#94a3b8!important}'
-        '.info-banner{background:' + hk + ';border:1px solid ' + az + ';color:' + bp + ';padding:10px 12px;border-radius:8px;margin:0 0 12px}'
-        '.info-banner.danger{background:#fef2f2;border-color:' + vm + ';color:#7f1d1d}'
+        '.sm-root .btn-primary,.sm-root .btn-secondary,.sm-root .btn-tag-add,.sm-root .btn-tag-confirm{border:none;'
+        'border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:13px;'
+        'text-decoration:none!important;display:inline-block}'
+        '.sm-root .btn-primary,.sm-root .btn-tag-confirm{background:' + ny + ';color:#fff!important}'
+        '.sm-root .btn-secondary{background:#fff;color:' + ny + '!important;border:1px solid ' + ic + '}'
+        '.sm-root .btn-tag-add{background:' + tb + ';color:' + ny + '!important}'
+        '.icon-btn{color:' + sp + ';font-size:16px;padding:4px}'
+        'tr.event-upcoming td:first-child a{color:' + sp + '}'
+        'tr.event-past{color:' + sp + ';opacity:.65}'
+        'tr.event-past a{color:' + sp + '!important}'
+        '.info-banner{background:' + ic + ';border:1px solid ' + sp + ';color:' + ny + ';padding:10px 12px;border-radius:8px;margin:0 0 12px}'
+        '.info-banner.danger{background:' + sn + ';border-color:' + ar + ';color:' + ar + '}'
         '.filter-bar,.assign-form .filter-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 12px}'
-        '.filter-bar input,.filter-bar select,.cfg-field input{padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;font-size:13px}'
+        '.filter-bar input,.filter-bar select,.cfg-field input{padding:8px 10px;border:1px solid ' + ic + ';border-radius:8px;font-size:13px}'
         '.cfg-form .vbs-card{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}'
         '.cfg-form h3{grid-column:1/-1}'
-        '.cfg-field{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;color:' + bp + '}'
+        '.cfg-field{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;color:' + ny + '}'
         '.group-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin:0 0 16px}'
-        '.group-card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:12px}'
-        '.group-card h3{margin:0 0 4px;color:' + dr + '}'
+        '.group-card{background:#fff;border:1px solid ' + ic + ';border-radius:10px;padding:12px}'
+        '.group-card h3{margin:0 0 4px;color:' + ny + '}'
         '.cover-cta{margin:0 0 14px}'
-        '.tag-modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,20,41,.45);z-index:40;align-items:center;justify-content:center}'
-        '.tag-modal-overlay.visible{display:flex}'
-        '.tag-modal{background:#fff;border-radius:12px;max-width:420px;width:90%;padding:0;box-shadow:0 8px 30px rgba(0,0,0,.2)}'
-        '.tag-modal-header{background:' + dr + ';color:#fff;padding:12px 16px;border-radius:12px 12px 0 0;font-weight:700}'
+        '.sm-root .tag-modal-overlay{display:none!important;position:fixed;inset:0;background:rgba(20,40,60,.45);'
+        'z-index:40;align-items:center;justify-content:center}'
+        '.sm-root .tag-modal-overlay.visible{display:flex!important}'
+        '.tag-modal{background:#fff;border-radius:12px;max-width:420px;width:90%;padding:0;box-shadow:0 8px 30px rgba(20,40,60,.2)}'
+        '.tag-modal-header{background:' + ny + ';color:#fff;padding:12px 16px;border-radius:12px 12px 0 0;font-weight:700}'
         '.tag-modal-body{padding:14px 16px}'
         '.tag-modal-body input[type=text]{width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:8px;box-sizing:border-box}'
         '.tag-modal-footer{padding:10px 16px 14px;display:flex;justify-content:flex-end;gap:8px}'
         '.option-row{display:flex;gap:8px;align-items:flex-start;font-size:12px;margin:8px 0;font-weight:500}'
+        '@media (max-width:720px){'
+        '.sm-root{padding:10px}'
+        '.dashboard-header{padding:14px 12px 12px;max-width:100%}'
+        '.sm-header-hero img{max-height:72px}'
+        '.dashboard-header h1{font-size:15px}'
+        '.dash-nav{text-align:center;padding:28px 8px 10px}'
+        '.dash-nav-caret{left:50%;right:auto;transform:translateX(-50%);top:4px}'
+        '.dash-nav-body,.dash-nav-segment,.dash-tabs{width:100%;text-align:center;justify-content:center}'
+        '.dash-tab{margin:3px}'
+        '.home-row-hero,.home-row-att,.home-row-events,.home-row-leaders,'
+        '.stats-grid,.stats-grid.compact{grid-template-columns:1fr}'
+        '.stat-card.stat-hero{padding:20px 12px}'
+        '.stat-card.stat-hero .stat-value{font-size:40px}'
+        '.group-grid{grid-template-columns:1fr}'
+        '.cfg-form .vbs-card{grid-template-columns:1fr}'
+        '.filter-bar,.assign-form .filter-bar,.list-actions{flex-direction:column;align-items:stretch}'
+        '.filter-bar input,.filter-bar select,.cfg-field input{width:100%;box-sizing:border-box}'
+        '.people-table{font-size:12px}'
+        '.table-scroll{-webkit-overflow-scrolling:touch}'
+        '}'
     )
 
 
 def _page_script():
     path = _script_path()
     return (
+        "(function(){try{"
         "var scriptUrl='" + path.replace("'", "\\'") + "';"
         "function $(s,r){return (r||document).querySelector(s);}"
         "function addClass(el,c){if(el) el.className=(el.className+' '+c).replace(/^\\s+|\\s+$/g,'');}"
@@ -2140,6 +2432,8 @@ def _page_script():
         "if(kind==='num'){var na=parseFloat(ta)||0,nb=parseFloat(tb)||0;return dir==='asc'?na-nb:nb-na;}"
         "ta=ta.toLowerCase();tb=tb.toLowerCase();if(ta<tb)return dir==='asc'?-1:1;if(ta>tb)return dir==='asc'?1:-1;return 0;});"
         "var tbod=table.tBodies[0];for(var j=0;j<rows.length;j++)tbod.appendChild(rows[j]);}"
+        "}catch(err){}}"
+        ")();"
     )
 
 
@@ -2172,7 +2466,7 @@ def _page(view, cfg, msg, can_write, can_admin, can_access):
         role_label = 'No access'
     html = '<style type="text/css">' + _css() + '</style>'
     html += '<div class="sm-root sm-view-' + _html(view) + '">'
-    html += '<div class="tag-modal-overlay" id="tag-modal-overlay" role="dialog">'
+    html += '<div class="tag-modal-overlay" id="tag-modal-overlay">'
     html += '<div class="tag-modal"><div class="tag-modal-header" id="tag-modal-title">Add to Tag</div>'
     html += '<div class="tag-modal-body"><p class="tag-modal-meta" id="tag-modal-count"></p>'
     html += '<label for="tag-name-input">Tag name</label>'
@@ -2191,7 +2485,10 @@ def _page(view, cfg, msg, can_write, can_admin, can_access):
     html += '<div class="dashboard-header">'
     html += _header_hero_html(cfg)
     html += '<h1>' + _html(APP_TITLE) + '</h1>'
-    html += '<div class="role-pill">' + role_label + '</div></div>'
+    html += '<div class="hdr-actions">'
+    html += '<div class="role-pill">' + role_label + '</div>'
+    html += _refresh_button(view)
+    html += '</div></div>'
     html += _nav(view, can_admin)
     html += alert
     html += '<div class="sm-main">' + body + '</div></div>'
@@ -2280,8 +2577,8 @@ try:
     main()
 except Exception, ex:
     err = (
-        '<div style="background:#fef2f2;border:2px solid #dc2626;color:#991b1b;padding:16px;margin:12px;'
-        'border-radius:8px;font-family:sans-serif"><strong>Student Ministry Command Center error</strong>'
+        '<div style="background:#F7F4F0;border:2px solid #DD5B58;color:#DD5B58;padding:16px;margin:12px;'
+        'border-radius:8px;font-family:sans-serif"><strong>Student Ministry Central error</strong>'
         '<pre style="white-space:pre-wrap">' + _html(_ex_msg(ex)) + '\n' + _html(traceback.format_exc()) + '</pre></div>'
     )
     try:

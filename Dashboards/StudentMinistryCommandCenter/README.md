@@ -66,6 +66,6 @@ July 1 – June 30.
 
 1. Paste the Python script.
 2. Open the dashboard as Admin → Config.
-3. Enter MS/HS Org#s, Student Ministry Program Id, three leader Org#s, Kids/Awana Program Ids.
+3. Enter MS/HS Org#s, three leader Org#s, Faith Kids + Awana **Division Ids**. Next Gen Program defaults to **1112**.
 4. Save. Confirm tiles populate.
 5. Audit Volunteer Program Id / extra Org#s before trusting “serving outside Refuge.”

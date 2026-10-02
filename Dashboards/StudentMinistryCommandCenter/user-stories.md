@@ -126,6 +126,17 @@ hold field names, Org#s, Prog/Div, and technical rules.
 **I want** Home to match VBS Home Base / Awana branding
 **So that** it feels like a first-class FCC tool.
 
+### US-B10 — Use the dashboard on a phone `v1` `infra`
+**As a** Ministry Leader
+**I want** Home, nav, and lists to work on a phone
+**So that** I can check attendance and events without a laptop.
+
+**Acceptance**
+- Tiles stack to one column
+- Nav pills are centered and wrap
+- Tables scroll horizontally
+- Buttons and pills are tappable (no hover-only)
+
 ---
 
 ## Epic C — Volunteers
@@ -199,7 +210,7 @@ hold field names, Org#s, Prog/Div, and technical rules.
 **So that** we see the Next Gen handoff.
 
 **Acceptance**
-- Kids/Awana side via Config Prog/Div
+- Kids/Awana side via Next Gen Program 1112 + Config Division Ids
 - Rate + drill-down: still here vs missing
 - Cohort rule TBD (Q9)
 
@@ -327,3 +338,4 @@ Only if Involvement Dashboard is not enough. Not v1.
 | 2026-09-21 | Initial stories from revised v1 (Home + Volunteers + Demographics + Ministry + Small Groups; no Events tab) |
 | 2026-09-21 | Build started: StudentMinistryCommandCenter.py v1 scaffold |
 | 2026-09-21 | Renamed script to StudentMinistryCentral.py |
+| 2026-09-23 | US-B10 mobile layout; centered nav |
