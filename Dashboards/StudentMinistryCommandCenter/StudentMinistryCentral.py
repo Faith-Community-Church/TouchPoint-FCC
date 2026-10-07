@@ -20,6 +20,7 @@
 
 import datetime
 import json
+import math
 import traceback
 
 try:
@@ -38,19 +39,19 @@ NEXT_GEN_PROGRAM_ID = 1112
 EVENT_DIVISION_ID = 46
 # Volunteer Program — student serving-outside involvements.
 VOLUNTEER_PROGRAM_ID = 1120
+# Weekly Sunday in-person service attendance (two meeting times, head count).
+SUNDAY_ATTEND_ORGID = 35
 HEADER_LOGO_URL = (
     'https://irp.cdn-website.com/395ab2a8/dms3rep/multi/opt/RefugeStudents-logos-40-1920w.png'
 )
 
-# Refuge / Student Ministry palette only — not FCC church brand.
-# Combo 1: Navy + Ice + Spruce (Tennis Ball accent)
-# Combo 2: Navy + Artisan + Snow + Ice
+# Refuge / Student Ministry — Navy + White. Artisan for alerts / accents.
+# Dark gray for month headers so they stand apart from navy and Artisan.
 BRAND = {
     'navy': '#14283C',
-    'spruce': '#2C5148',
-    'snow': '#F7F4F0',
-    'ice': '#BDDAD6',
-    'tennis-ball': '#DEDD54',
+    'white': '#FFFFFF',
+    'gray': '#EEF0F2',
+    'dark-gray': '#565E66',
     'artisan': '#DD5B58',
 }
 
@@ -106,6 +107,17 @@ def _s(val, default=''):
     return s
 
 
+def _unquote(val):
+    """Strip wrapping quotes from Extra Value text. Stored quotes are not needed on screen."""
+    s = _s(val)
+    while len(s) >= 2 and (
+            (s[0] == '"' and s[-1] == '"') or (s[0] == "'" and s[-1] == "'")):
+        s = s[1:-1].strip()
+    if s == '' or s == 'None' or s == 'null':
+        return ''
+    return s
+
+
 def _i(val, default=0):
     s = _s(val)
     if not s:
@@ -117,6 +129,25 @@ def _i(val, default=0):
             return int(float(s))
         except:
             return default
+
+
+def _round_half_up(n):
+    """0.4 and below down, 0.5 and above up. Returns an int."""
+    try:
+        x = float(n)
+    except:
+        return 0
+    if x >= 0:
+        return int(math.floor(x + 0.5))
+    return int(math.ceil(x - 0.5))
+
+
+def _avg_label(avg, weeks=None):
+    if weeks is not None and _i(weeks) <= 0:
+        return '—'
+    if avg is None:
+        return '—'
+    return str(_round_half_up(avg))
 
 
 def _b(val):
@@ -175,11 +206,21 @@ def _url_enc(val):
 def _refresh_href(view):
     """Reload the current view, keeping list/filter/drill query params."""
     href = _script_path() + '?view=' + _s(view or 'home')
-    for key in ('drill', 'list', 'grade', 'gender', 'school', 'q', 'group'):
+    for key in ('drill', 'att', 'list', 'grade', 'gender', 'school', 'q', 'group'):
         val = _s(_form_val(key))
         if val:
             href += '&' + key + '=' + _url_enc(val)
     href += '&refresh=1'
+    if _s(_form_val('drill')):
+        href += '#sm-drill-list'
+    elif view == 'volunteers':
+        href += _vol_list_hash(_s(_form_val('list')))
+    elif _s(_form_val('section')) == 'serving':
+        href += '#sm-serving-beyond'
+    elif view == 'demographics' and (
+            _s(_form_val('grade')) or _s(_form_val('gender'))
+            or _s(_form_val('school')) or _s(_form_val('q'))):
+        href += '#sm-filtered-list'
     return href
 
 
@@ -265,6 +306,37 @@ def _date_display(d):
         return _ymd(dt)
 
 
+def _dt_display(val):
+    """Meeting date + time, e.g. Oct 5, 2026 6:30 PM."""
+    if _is_null(val):
+        return _date_display(val)
+    try:
+        if hasattr(val, 'Year'):
+            y = int(val.Year)
+            mo = int(val.Month)
+            d = int(val.Day)
+            h = int(val.Hour) if hasattr(val, 'Hour') else 0
+            mi = int(val.Minute) if hasattr(val, 'Minute') else 0
+        else:
+            y = int(val.year)
+            mo = int(val.month)
+            d = int(val.day)
+            h = int(getattr(val, 'hour', 0) or 0)
+            mi = int(getattr(val, 'minute', 0) or 0)
+        hour = h % 12
+        if hour == 0:
+            hour = 12
+        ampm = 'PM' if h >= 12 else 'AM'
+        if mi < 10:
+            mpart = '0' + str(mi)
+        else:
+            mpart = str(mi)
+        dt = datetime.date(y, mo, d)
+        return dt.strftime('%b ') + str(d) + ', ' + str(y) + ' ' + str(hour) + ':' + mpart + ' ' + ampm
+    except:
+        return _date_display(val)
+
+
 def _md_display(month, day):
     """Birthday-style date without year: July 1."""
     try:
@@ -289,6 +361,33 @@ def _parse_date(val):
         except:
             return None
     return None
+
+
+def _parse_date_loose(val):
+    """Parse ISO, US, or Month Day, Year strings. Returns None if not a date."""
+    dt = _parse_date(val)
+    if dt:
+        return dt
+    s = _s(val).strip()
+    if not s:
+        return None
+    for fmt in ('%m/%d/%Y', '%m/%d/%y', '%B %d, %Y', '%b %d, %Y', '%m-%d-%Y', '%Y/%m/%d'):
+        try:
+            return datetime.datetime.strptime(s, fmt).date()
+        except:
+            pass
+    return None
+
+
+def _when_display(ev):
+    """When column: meeting dates. One date if same day; otherwise First – Last."""
+    first = (ev or {}).get('first')
+    last = (ev or {}).get('last')
+    first_s = _date_display(first)
+    last_s = _date_display(last)
+    if first_s and last_s and first_s != last_s:
+        return first_s + ' – ' + last_s
+    return first_s or last_s or '—'
 
 
 def _fy_bounds(d=None):
@@ -316,6 +415,60 @@ def _add_days(d, n):
     return d + datetime.timedelta(days=_i(n))
 
 
+def _academic_year_start(d=None):
+    """Academic year starts September 1. Jan–Aug belongs to the prior Sept."""
+    if d is None:
+        d = _today()
+    if d.month >= 9:
+        return datetime.date(d.year, 9, 1)
+    return datetime.date(d.year - 1, 9, 1)
+
+
+def _academic_fq_specs(today=None):
+    """id, label, subtitle, start, end-exclusive."""
+    if today is None:
+        today = _today()
+    ay_y = _academic_year_start(today).year
+    return [
+        ('fq1', 'FQ1', 'September', datetime.date(ay_y, 9, 1), datetime.date(ay_y, 10, 1)),
+        ('fq2', 'FQ2', 'Oct – Dec', datetime.date(ay_y, 10, 1), datetime.date(ay_y + 1, 1, 1)),
+        ('fq3', 'FQ3', 'Jan – Mar', datetime.date(ay_y + 1, 1, 1), datetime.date(ay_y + 1, 4, 1)),
+        ('fq4', 'FQ4', 'April – May', datetime.date(ay_y + 1, 4, 1), datetime.date(ay_y + 1, 6, 1)),
+    ]
+
+
+def _merge_meeting_days(*lists):
+    by_day = {}
+    for days in lists:
+        for row in days or []:
+            d = row.get('day')
+            if not d:
+                continue
+            by_day[d] = by_day.get(d, 0) + _i(row.get('count'))
+    out = []
+    keys = list(by_day.keys())
+    try:
+        keys.sort()
+    except:
+        pass
+    for d in keys:
+        n = by_day[d]
+        if n > 0:
+            out.append({'day': d, 'count': n})
+    return out
+
+
+def _add_years(d, n):
+    """Same month/day n years later (or earlier). Feb 29 becomes Feb 28."""
+    if d is None:
+        return None
+    y = d.year + _i(n)
+    try:
+        return datetime.date(y, d.month, d.day)
+    except:
+        return datetime.date(y, d.month, 28)
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -325,9 +478,12 @@ def _default_config():
         'version': 1,
         'ms_orgid': 0,
         'hs_orgid': 0,
+        'sunday_attendance_orgid': SUNDAY_ATTEND_ORGID,
         'week_start_dow': 2,
+        'awag_division_ids': '',
         'event_program_id': NEXT_GEN_PROGRAM_ID,
         'event_division_ids': str(EVENT_DIVISION_ID),
+        'event_date_extra': 'Date',
         'leaders_orgid': 0,
         'student_leaders_orgid': 0,
         'coaches_orgid': 0,
@@ -448,6 +604,8 @@ def _load_config():
             cfg['event_division_ids'] = str(EVENT_DIVISION_ID)
         if _i(cfg.get('volunteer_program_id'), 0) <= 0:
             cfg['volunteer_program_id'] = VOLUNTEER_PROGRAM_ID
+        if _i(cfg.get('sunday_attendance_orgid'), 0) <= 0:
+            cfg['sunday_attendance_orgid'] = SUNDAY_ATTEND_ORGID
         _CONFIG_LOAD_INFO = status + ' · ' + str(len(raw)) + ' chars'
     else:
         _CONFIG_LOAD_INFO = status + ' · defaults only'
@@ -474,18 +632,24 @@ def _standing_orgs(cfg):
 
 
 def _leader_orgs(cfg):
+    """Small group leaders: Volunteer Leaders + SG Coaches. Not Student Lead Team."""
     out = []
-    for key in ('leaders_orgid', 'student_leaders_orgid', 'coaches_orgid'):
+    for key in ('leaders_orgid', 'coaches_orgid'):
         n = _cfg_i(cfg, key)
         if n > 0:
             out.append(n)
     return out
 
 
+def _sg_assign_leader_orgs(cfg):
+    return _leader_orgs(cfg)
+
+
 def _exclude_orgs(cfg):
     seen = {}
     out = []
-    for n in _standing_orgs(cfg) + _leader_orgs(cfg):
+    extra = _cfg_i(cfg, 'student_leaders_orgid')
+    for n in _standing_orgs(cfg) + _leader_orgs(cfg) + [extra]:
         if n not in seen:
             seen[n] = True
             out.append(n)
@@ -587,12 +751,33 @@ def _person_row(r):
         'age': _i(r.Age) if hasattr(r, 'Age') and not _is_null(r.Age) else '',
         'grade': _s(r.GradeLabel) if hasattr(r, 'GradeLabel') else '',
         'gender': _s(r.GenderLabel) if hasattr(r, 'GenderLabel') else '',
-        'school': _s(r.SchoolOther) if hasattr(r, 'SchoolOther') else '',
+        'school': _unquote(r.SchoolDistrict) if hasattr(r, 'SchoolDistrict') else '',
         'groups': _s(r.GroupNames) if hasattr(r, 'GroupNames') else '',
         'org_id': _i(r.OrganizationId) if hasattr(r, 'OrganizationId') else 0,
         'org_name': _s(r.OrganizationName) if hasattr(r, 'OrganizationName') else '',
         'extra': _s(r.Extra) if hasattr(r, 'Extra') else '',
     }
+
+
+def _sql_school_expr():
+    """People Extra Value 'School District' (text or code)."""
+    return """COALESCE(
+        NULLIF(LTRIM(RTRIM(ISNULL(sx.StrValue,''))), ''),
+        NULLIF(LTRIM(RTRIM(ISNULL(sx.Data,''))), ''),
+        ''
+    )"""
+
+
+def _sql_school_select():
+    return _sql_school_expr() + ' AS SchoolDistrict'
+
+
+def _sql_school_join(people_alias='pe'):
+    return """
+LEFT JOIN dbo.PeopleExtra sx
+ON sx.PeopleId = """ + people_alias + """.PeopleId
+AND LOWER(LTRIM(RTRIM(ISNULL(sx.Field,'')))) = 'school district'
+"""
 
 
 def _sql_person_select():
@@ -602,7 +787,7 @@ def _sql_person_select():
     pe.FirstName,
     pe.LastName,
     pe.Age,
-    ISNULL(pe.SchoolOther, '') AS SchoolOther,
+    """ + _sql_school_select() + """,
     CASE pe.GenderId WHEN 1 THEN 'Male' WHEN 2 THEN 'Female' ELSE 'Unknown' END AS GenderLabel,
     COALESCE(
         NULLIF(LTRIM(RTRIM(gl_om.Description)), ''),
@@ -617,14 +802,21 @@ def _sql_person_joins():
 INNER JOIN dbo.People pe ON pe.PeopleId = om.PeopleId
 LEFT JOIN lookup.GradeLevel gl_pe ON pe.GradeLevelId = gl_pe.Id
 LEFT JOIN lookup.GradeLevel gl_om ON om.GradeLevelId = gl_om.Id
-"""
+""" + _sql_school_join('pe')
 
 
-def _org_members(org_ids, extra_where=''):
+def _org_members(org_ids, extra_where='', exclude_leaders=False):
     org_ids = [n for n in (org_ids or []) if _i(n) > 0]
     if not org_ids:
         return []
     frag, names = _sql_in_int(org_ids, 'oid')
+    extra_join = ''
+    if exclude_leaders:
+        extra_join = ' LEFT JOIN lookup.MemberType lmt ON lmt.Id = om.MemberTypeId '
+        extra_where += """
+AND ISNULL(lmt.AttendanceTypeId, 0) <> 10
+AND UPPER(LTRIM(RTRIM(ISNULL(lmt.Description,'')))) NOT LIKE '%LEADER%'
+"""
     sql = """
 SELECT DISTINCT
 """ + _sql_person_select() + """
@@ -636,12 +828,12 @@ SELECT DISTINCT
         INNER JOIN dbo.MemberTags mt ON mt.Id = omt.MemberTagId AND mt.OrgId = omt.OrgId
         WHERE omt.OrgId = om.OrganizationId AND omt.PeopleId = om.PeopleId
         FOR XML PATH(''), TYPE
-      ).value('.', 'nvarchar(max)'), 1, 2, '') AS GroupNames
+    ).value('.', 'nvarchar(max)'), 1, 2, '') AS GroupNames
 FROM dbo.OrganizationMembers om
 INNER JOIN dbo.Organizations o ON o.OrganizationId = om.OrganizationId
-""" + _sql_person_joins() + """
+""" + _sql_person_joins() + extra_join + """
 WHERE om.OrganizationId IN (""" + frag + """)
-  AND ISNULL(pe.IsDeceased, 0) = 0
+AND ISNULL(pe.IsDeceased, 0) = 0
 """ + extra_where + """
 ORDER BY PersonName
 """
@@ -664,7 +856,7 @@ SELECT COUNT(*) AS Cnt
 FROM dbo.OrganizationMembers om
 INNER JOIN dbo.People pe ON pe.PeopleId = om.PeopleId
 WHERE om.OrganizationId = @oid
-  AND ISNULL(pe.IsDeceased, 0) = 0
+AND ISNULL(pe.IsDeceased, 0) = 0
 """
     p = _dd()
     p.AddValue('oid', org_id)
@@ -687,7 +879,7 @@ def _keyword_id(desc):
 SELECT TOP 1 KeywordId
 FROM dbo.Keyword
 WHERE LTRIM(RTRIM(Description)) = @d
-  AND ISNULL(IsActive, 1) = 1
+AND ISNULL(IsActive, 1) = 1
 """
     p = _dd()
     p.AddValue('d', desc)
@@ -725,22 +917,23 @@ def _people_with_keywords(kw_names, fy_only, cfg):
         fy_sql = ' AND tn.CreatedDate >= @fyS AND tn.CreatedDate < @fyE '
     sql = """
 SELECT tn.AboutPersonId AS PeopleId,
-       MAX(tn.CreatedDate) AS Extra,
-       ISNULL(pe.Name2, LTRIM(RTRIM(ISNULL(pe.FirstName,'') + ' ' + ISNULL(pe.LastName,'')))) AS PersonName,
-       pe.FirstName, pe.LastName, pe.Age,
-       ISNULL(pe.SchoolOther, '') AS SchoolOther,
-       CASE pe.GenderId WHEN 1 THEN 'Male' WHEN 2 THEN 'Female' ELSE 'Unknown' END AS GenderLabel,
-       ISNULL(gl.Description, 'Unknown') AS GradeLabel
+    MAX(tn.CreatedDate) AS Extra,
+    ISNULL(pe.Name2, LTRIM(RTRIM(ISNULL(pe.FirstName,'') + ' ' + ISNULL(pe.LastName,'')))) AS PersonName,
+    pe.FirstName, pe.LastName, pe.Age,
+    """ + _sql_school_select() + """,
+    CASE pe.GenderId WHEN 1 THEN 'Male' WHEN 2 THEN 'Female' ELSE 'Unknown' END AS GenderLabel,
+    ISNULL(gl.Description, 'Unknown') AS GradeLabel
 FROM dbo.TaskNote tn
 """ + joins + """
 INNER JOIN dbo.People pe ON pe.PeopleId = tn.AboutPersonId
 LEFT JOIN lookup.GradeLevel gl ON pe.GradeLevelId = gl.Id
+""" + _sql_school_join('pe') + """
 WHERE ISNULL(tn.IsArchived, 0) = 0
-  AND tn.AboutPersonId IS NOT NULL
-  AND ISNULL(pe.IsDeceased, 0) = 0
+AND tn.AboutPersonId IS NOT NULL
+AND ISNULL(pe.IsDeceased, 0) = 0
 """ + fy_sql + """
 GROUP BY tn.AboutPersonId, pe.Name2, pe.FirstName, pe.LastName, pe.Age,
-         pe.SchoolOther, pe.GenderId, gl.Description
+        pe.GenderId, gl.Description, sx.StrValue, sx.Data
 ORDER BY PersonName
 """
     p = _dd()
@@ -771,24 +964,25 @@ def _baptism_people(cfg):
     frag, names = _sql_in_int(org_ids, 'oid')
     if org_ids and _s(cfg.get('baptism_scope'), 'standing') == 'standing':
         org_sql = """
-  AND EXISTS (
-      SELECT 1 FROM dbo.OrganizationMembers om
-      WHERE om.PeopleId = pe.PeopleId
+AND EXISTS (
+    SELECT 1 FROM dbo.OrganizationMembers om
+    WHERE om.PeopleId = pe.PeopleId
         AND om.OrganizationId IN (""" + frag + """)
-  )
+)
 """
     sql = """
 SELECT pe.PeopleId,
-       ISNULL(pe.Name2, LTRIM(RTRIM(ISNULL(pe.FirstName,'') + ' ' + ISNULL(pe.LastName,'')))) AS PersonName,
-       pe.FirstName, pe.LastName, pe.Age,
-       ISNULL(pe.SchoolOther, '') AS SchoolOther,
-       CASE pe.GenderId WHEN 1 THEN 'Male' WHEN 2 THEN 'Female' ELSE 'Unknown' END AS GenderLabel,
-       ISNULL(gl.Description, 'Unknown') AS GradeLabel,
-       pe.BaptismDate AS Extra
+    ISNULL(pe.Name2, LTRIM(RTRIM(ISNULL(pe.FirstName,'') + ' ' + ISNULL(pe.LastName,'')))) AS PersonName,
+    pe.FirstName, pe.LastName, pe.Age,
+    """ + _sql_school_select() + """,
+    CASE pe.GenderId WHEN 1 THEN 'Male' WHEN 2 THEN 'Female' ELSE 'Unknown' END AS GenderLabel,
+    ISNULL(gl.Description, 'Unknown') AS GradeLabel,
+    pe.BaptismDate AS Extra
 FROM dbo.People pe
 LEFT JOIN lookup.GradeLevel gl ON pe.GradeLevelId = gl.Id
+""" + _sql_school_join('pe') + """
 WHERE pe.BaptismDate >= @fyS AND pe.BaptismDate < @fyE
-  AND ISNULL(pe.IsDeceased, 0) = 0
+AND ISNULL(pe.IsDeceased, 0) = 0
 """ + org_sql + """
 ORDER BY pe.BaptismDate, PersonName
 """
@@ -818,12 +1012,12 @@ def _attend_days(org_ids, start, end):
     frag, names = _sql_in_int(org_ids, 'oid')
     sql = """
 SELECT CAST(a.MeetingDate AS date) AS MeetDay,
-       COUNT(DISTINCT a.PeopleId) AS Cnt
+    COUNT(DISTINCT a.PeopleId) AS Cnt
 FROM dbo.Attend a
 WHERE a.OrganizationId IN (""" + frag + """)
-  AND a.AttendanceFlag = 1
-  AND a.MeetingDate >= @d1
-  AND a.MeetingDate < @d2
+AND a.AttendanceFlag = 1
+AND a.MeetingDate >= @d1
+AND a.MeetingDate < @d2
 GROUP BY CAST(a.MeetingDate AS date)
 ORDER BY MeetDay
 """
@@ -844,6 +1038,305 @@ ORDER BY MeetDay
     return out
 
 
+def _attend_unique_count(org_ids, start, end):
+    """Distinct present people in [start, end)."""
+    org_ids = [n for n in (org_ids or []) if _i(n) > 0]
+    if not org_ids or start is None or end is None:
+        return 0
+    frag, names = _sql_in_int(org_ids, 'oid')
+    sql = """
+SELECT COUNT(DISTINCT a.PeopleId) AS Cnt
+FROM dbo.Attend a
+INNER JOIN dbo.People pe ON pe.PeopleId = a.PeopleId
+WHERE a.OrganizationId IN (""" + frag + """)
+AND a.AttendanceFlag = 1
+AND a.MeetingDate >= @d1
+AND a.MeetingDate < @d2
+AND ISNULL(pe.IsDeceased, 0) = 0
+"""
+    p = _dd()
+    _bind_ids(p, names)
+    p.AddValue('d1', _ymd(start))
+    p.AddValue('d2', _ymd(end))
+    try:
+        rows = list(q.QuerySql(sql, p))
+        if rows:
+            return _i(rows[0].Cnt)
+    except Exception, ex:
+        _warn('unique attend: ' + _ex_msg(ex))
+    return 0
+
+
+def _sunday_headcount_average(org_id, start, end):
+    """FY Sunday average for Inv#35.
+
+    Each Sunday is the SUM of that day's meeting head counts (both service
+    times added, never averaged). The mean is then taken across those Sunday
+    totals in [start, end).
+    """
+    org_id = _i(org_id)
+    if org_id <= 0 or start is None or end is None:
+        return 0.0, 0
+    # Do not look past today — FY window is July 1 through now (or FY end).
+    today = _today()
+    if end > _add_days(today, 1):
+        end = _add_days(today, 1)
+    sql = """
+SELECT m.MeetingDate,
+    ISNULL(m.HeadCount, 0) AS HeadCnt,
+    ISNULL(m.NumPresent, 0) AS PresentCnt
+FROM dbo.Meetings m
+WHERE m.OrganizationId = @oid
+AND ISNULL(m.DidNotMeet, 0) = 0
+AND m.MeetingDate >= @d1
+AND m.MeetingDate < @d2
+"""
+    p = _dd()
+    p.AddValue('oid', org_id)
+    p.AddValue('d1', _ymd(start))
+    p.AddValue('d2', _ymd(end))
+    try:
+        rows = list(q.QuerySql(sql, p))
+    except Exception, ex:
+        _warn('Sunday head count: ' + _ex_msg(ex))
+        return 0.0, 0
+    by_day = {}
+    for r in rows:
+        d = _parse_date(r.MeetingDate)
+        if not d or d.weekday() != 6:
+            continue
+        hc = _i(r.HeadCnt)
+        if hc <= 0:
+            hc = _i(r.PresentCnt)
+        by_day[d] = by_day.get(d, 0) + hc
+    vals = []
+    for n in by_day.values():
+        if n > 0:
+            vals.append(n)
+    if not vals:
+        return 0.0, 0
+    avg = float(sum(vals)) / float(len(vals))
+    return avg, len(vals)
+
+
+def _month_bounds(year, month):
+    first = datetime.date(year, month, 1)
+    if month == 12:
+        nxt = datetime.date(year + 1, 1, 1)
+    else:
+        nxt = datetime.date(year, month + 1, 1)
+    return first, nxt
+
+
+def _meeting_present(r):
+    """TouchPoint Count column: HeadCount when entered, else recorded attendance.
+
+    Meetings.MaxCount is max(HeadCount, NumPresent). Week at a Glance uses
+    MaxCount; the Meetings drill (Count) prefers HeadCount. Regular meetings
+    default to head count (RegularMeetingHeadCount = true).
+    """
+    n = _i(r.HeadCnt) if hasattr(r, 'HeadCnt') else 0
+    if n <= 0:
+        n = _i(r.PresentCnt) if hasattr(r, 'PresentCnt') else 0
+    if n <= 0:
+        n = _i(r.MaxCnt) if hasattr(r, 'MaxCnt') else 0
+    return n
+
+
+def _meeting_rows_to_days(rows):
+    by_day = {}
+    for r in rows or []:
+        d = _parse_date(r.MeetDay) if hasattr(r, 'MeetDay') else _parse_date(r.MeetingDate)
+        if not d:
+            continue
+        n = _meeting_present(r)
+        if n > 0:
+            by_day[d] = by_day.get(d, 0) + n
+    out = []
+    keys = list(by_day.keys())
+    try:
+        keys.sort()
+    except:
+        pass
+    for d in keys:
+        out.append({'day': d, 'count': by_day[d]})
+    return out
+
+
+def _meeting_days_for_orgs(org_ids, start, end):
+    """Meeting attendance on Config involvements (this year / month-over-month)."""
+    org_ids = [n for n in (org_ids or []) if _i(n) > 0]
+    if not org_ids or start is None or end is None:
+        return []
+    frag, names = _sql_in_int(org_ids, 'oid')
+    sql = """
+SELECT CAST(m.MeetingDate AS date) AS MeetDay,
+    ISNULL(m.MaxCount, 0) AS MaxCnt,
+    ISNULL(m.HeadCount, 0) AS HeadCnt,
+    ISNULL(m.NumPresent, 0) AS PresentCnt
+FROM dbo.Meetings m
+WHERE m.OrganizationId IN (""" + frag + """)
+AND ISNULL(m.DidNotMeet, 0) = 0
+AND m.MeetingDate >= @d1
+AND m.MeetingDate < @d2
+"""
+    p = _dd()
+    _bind_ids(p, names)
+    p.AddValue('d1', _ymd(start))
+    p.AddValue('d2', _ymd(end))
+    try:
+        rows = list(q.QuerySql(sql, p))
+    except Exception, ex:
+        _warn('org meetings: ' + _ex_msg(ex))
+        return []
+    return _meeting_rows_to_days(rows)
+
+
+def _meetings_for_orgs(org_ids, start, end):
+    """Individual meetings for tile drill-down (Week at a Glance → Meetings)."""
+    org_ids = [n for n in (org_ids or []) if _i(n) > 0]
+    if not org_ids or start is None or end is None:
+        return []
+    frag, names = _sql_in_int(org_ids, 'oid')
+    sql = """
+SELECT m.MeetingId, m.OrganizationId, o.OrganizationName, m.MeetingDate,
+    ISNULL(m.HeadCount, 0) AS HeadCnt,
+    ISNULL(m.NumPresent, 0) AS PresentCnt,
+    ISNULL(m.MaxCount, 0) AS MaxCnt
+FROM dbo.Meetings m
+INNER JOIN dbo.Organizations o ON o.OrganizationId = m.OrganizationId
+WHERE m.OrganizationId IN (""" + frag + """)
+AND ISNULL(m.DidNotMeet, 0) = 0
+AND m.MeetingDate >= @d1
+AND m.MeetingDate < @d2
+ORDER BY m.MeetingDate, o.OrganizationName
+"""
+    p = _dd()
+    _bind_ids(p, names)
+    p.AddValue('d1', _ymd(start))
+    p.AddValue('d2', _ymd(end))
+    try:
+        rows = list(q.QuerySql(sql, p))
+    except Exception, ex:
+        _warn('meeting drill: ' + _ex_msg(ex))
+        return []
+    out = []
+    for r in rows:
+        out.append({
+            'meeting_id': _i(r.MeetingId),
+            'org_id': _i(r.OrganizationId),
+            'org_name': _s(r.OrganizationName),
+            'when': r.MeetingDate,
+            'day': _parse_date(r.MeetingDate),
+            'head': _i(r.HeadCnt),
+            'recorded': _i(r.PresentCnt),
+            'used': _meeting_present(r),
+        })
+    return out
+
+
+def _days_from_meetings(meetings):
+    by_day = {}
+    for m in meetings or []:
+        d = m.get('day')
+        n = _i(m.get('used'))
+        if d and n > 0:
+            by_day[d] = by_day.get(d, 0) + n
+    out = []
+    keys = list(by_day.keys())
+    try:
+        keys.sort()
+    except:
+        pass
+    for d in keys:
+        out.append({'day': d, 'count': by_day[d]})
+    return out
+
+
+def _div_ids_for_orgs(org_ids):
+    org_ids = [n for n in (org_ids or []) if _i(n) > 0]
+    if not org_ids:
+        return []
+    frag, names = _sql_in_int(org_ids, 'oid')
+    sql = """
+SELECT DISTINCT dd.DivId
+FROM dbo.DivOrg dd
+WHERE dd.OrgId IN (""" + frag + """)
+AND ISNULL(dd.DivId, 0) > 0
+UNION
+SELECT DISTINCT o.DivisionId
+FROM dbo.Organizations o
+WHERE o.OrganizationId IN (""" + frag + """)
+AND ISNULL(o.DivisionId, 0) > 0
+"""
+    p = _dd()
+    _bind_ids(p, names)
+    try:
+        rows = list(q.QuerySql(sql, p))
+    except Exception, ex:
+        _warn('org divisions: ' + _ex_msg(ex))
+        return []
+    out = []
+    seen = {}
+    for r in rows:
+        n = _i(r.DivId)
+        if n > 0 and n not in seen:
+            seen[n] = True
+            out.append(n)
+    return out
+
+
+def _awag_div_ids(cfg):
+    pinned = _parse_id_list(cfg.get('awag_division_ids'))
+    if pinned:
+        return pinned
+    return _div_ids_for_orgs(_standing_orgs(cfg))
+
+
+def _meeting_days_for_divs(div_ids, prog_id, start, end):
+    """Average Week at a Glance path: Meetings on orgs in Program/Division.
+
+    Last year's involvements still count if they sat in the same Division.
+    """
+    div_ids = [n for n in (div_ids or []) if _i(n) > 0]
+    if not div_ids or start is None or end is None:
+        return []
+    frag, names = _sql_in_int(div_ids, 'div')
+    prog_id = _i(prog_id)
+    prog_sql = '1=1'
+    p = _dd()
+    _bind_ids(p, names)
+    if prog_id > 0:
+        prog_sql = 'EXISTS (SELECT 1 FROM dbo.ProgDiv pd WHERE pd.DivId = dd.DivId AND pd.ProgId = @prog)'
+        p.AddValue('prog', prog_id)
+    sql = """
+SELECT CAST(m.MeetingDate AS date) AS MeetDay,
+    ISNULL(m.MaxCount, 0) AS MaxCnt,
+    ISNULL(m.HeadCount, 0) AS HeadCnt,
+    ISNULL(m.NumPresent, 0) AS PresentCnt
+FROM dbo.Meetings m
+WHERE ISNULL(m.DidNotMeet, 0) = 0
+AND m.MeetingDate >= @d1
+AND m.MeetingDate < @d2
+AND (ISNULL(m.HeadCount, 0) > 0 OR ISNULL(m.NumPresent, 0) > 0)
+AND EXISTS (
+    SELECT 1
+    FROM dbo.DivOrg dd
+    WHERE dd.OrgId = m.OrganizationId
+    AND dd.DivId IN (""" + frag + """)
+    AND """ + prog_sql + """
+)
+"""
+    p.AddValue('d1', _ymd(start))
+    p.AddValue('d2', _ymd(end))
+    try:
+        rows = list(q.QuerySql(sql, p))
+    except Exception, ex:
+        _warn('division meetings: ' + _ex_msg(ex))
+        return []
+    return _meeting_rows_to_days(rows)
+
+
 def _attend_people(org_ids, start, end):
     org_ids = [n for n in (org_ids or []) if _i(n) > 0]
     if not org_ids:
@@ -854,17 +1347,18 @@ SELECT DISTINCT
     pe.PeopleId,
     ISNULL(pe.Name2, LTRIM(RTRIM(ISNULL(pe.FirstName,'') + ' ' + ISNULL(pe.LastName,'')))) AS PersonName,
     pe.FirstName, pe.LastName, pe.Age,
-    ISNULL(pe.SchoolOther, '') AS SchoolOther,
+    """ + _sql_school_select() + """,
     CASE pe.GenderId WHEN 1 THEN 'Male' WHEN 2 THEN 'Female' ELSE 'Unknown' END AS GenderLabel,
     ISNULL(gl.Description, 'Unknown') AS GradeLabel
 FROM dbo.Attend a
 INNER JOIN dbo.People pe ON pe.PeopleId = a.PeopleId
 LEFT JOIN lookup.GradeLevel gl ON pe.GradeLevelId = gl.Id
+""" + _sql_school_join('pe') + """
 WHERE a.OrganizationId IN (""" + frag + """)
-  AND a.AttendanceFlag = 1
-  AND a.MeetingDate >= @d1
-  AND a.MeetingDate < @d2
-  AND ISNULL(pe.IsDeceased, 0) = 0
+AND a.AttendanceFlag = 1
+AND a.MeetingDate >= @d1
+AND a.MeetingDate < @d2
+AND ISNULL(pe.IsDeceased, 0) = 0
 ORDER BY PersonName
 """
     p = _dd()
@@ -889,26 +1383,54 @@ def _week_present_total(days, week_start, week_end):
     return total
 
 
+def _sunday_for_date(d):
+    """dbo.SundayForDate — Sunday on or before d (Average Week at a Glance)."""
+    if d is None:
+        return None
+    return _add_days(d, -((d.weekday() + 1) % 7))
+
+
+def _awag_week_vals(days, start, end):
+    """Sunday-week present totals in [start, end). Empty weeks stay in the list."""
+    if not start or not end or start >= end:
+        return []
+    sun = _sunday_for_date(start)
+    if sun < start:
+        sun = _add_days(sun, 7)
+    rows = []
+    while sun < end:
+        w1 = sun
+        w2 = _add_days(sun, 7)
+        if w1 < start:
+            w1 = start
+        if w2 > end:
+            w2 = end
+        n = _week_present_total(days, w1, w2)
+        rows.append({'sunday': sun, 'start': w1, 'end': w2, 'count': n, 'included': n > 0})
+        sun = _add_days(sun, 7)
+    return rows
+
+
+def _awag_average(days, start, end):
+    """Average Week at a Glance (Involvement > Reports > ChurchAttendance2).
+
+    Sundays in [start, end) from SundayForDate. Each week sums present on
+    [Sunday, next Sunday), clipped to the range. Weeks with 0 present are
+    skipped. Year-over-year uses this window shifted 364 days (52 weeks).
+    """
+    included = []
+    for row in _awag_week_vals(days, start, end):
+        if row.get('included'):
+            included.append(_i(row.get('count')))
+    if not included:
+        return 0.0, 0
+    return float(sum(included)) / float(len(included)), len(included)
+
+
 def _month_weekly_average(days, year, month, dow):
     """Mean of weekly present totals that fall in this calendar month."""
-    first = datetime.date(year, month, 1)
-    if month == 12:
-        nxt = datetime.date(year + 1, 1, 1)
-    else:
-        nxt = datetime.date(year, month + 1, 1)
-    weeks = {}
-    for row in days:
-        d = row.get('day')
-        if not d or d < first or d >= nxt:
-            continue
-        ws = _week_start(d, dow)
-        key = _ymd(ws)
-        weeks[key] = weeks.get(key, 0) + _i(row.get('count'))
-    if not weeks:
-        return 0.0, 0
-    vals = list(weeks.values())
-    avg = float(sum(vals)) / float(len(vals))
-    return avg, len(vals)
+    first, nxt = _month_bounds(year, month)
+    return _awag_average(days, first, nxt)
 
 
 def _attendance_bundle(cfg):
@@ -920,21 +1442,78 @@ def _attendance_bundle(cfg):
     this_ws = _week_start(today, dow)
     last_ws = _add_days(this_ws, -7)
     ly_ws = _add_days(this_ws, -364)
-    lookback = _add_days(this_ws, -400)
-    ahead = _add_days(this_ws, 7)
-    days = _attend_days(orgs, lookback, ahead)
-    this_c = _week_present_total(days, this_ws, _add_days(this_ws, 7))
-    last_c = _week_present_total(days, last_ws, this_ws)
-    ly_c = _week_present_total(days, ly_ws, _add_days(ly_ws, 7))
-    month_days = _attend_days(orgs, datetime.date(today.year - 1, 1, 1), _add_days(today, 32))
-    this_avg, this_n = _month_weekly_average(month_days, today.year, today.month, dow)
+    this_end = _add_days(today, 1)
     prev_m = today.month - 1
     prev_y = today.year
     if prev_m < 1:
         prev_m = 12
         prev_y -= 1
-    last_avg, last_n = _month_weekly_average(month_days, prev_y, prev_m, dow)
-    ly_avg, ly_n = _month_weekly_average(month_days, today.year - 1, today.month, dow)
+    prev2_m = prev_m - 1
+    prev2_y = prev_y
+    if prev2_m < 1:
+        prev2_m = 12
+        prev2_y -= 1
+    this_first = datetime.date(today.year, today.month, 1)
+    last_first, last_next = _month_bounds(prev_y, prev_m)
+    prev2_first, prev2_next = _month_bounds(prev2_y, prev2_m)
+    ly_this_first = _add_years(this_first, -1)
+    ly_this_end = _add_years(this_end, -1)
+    ly_last_first = _add_years(last_first, -1)
+    ly_last_next = _add_years(last_next, -1)
+    ay_start = _academic_year_start(today)
+    fq_specs = _academic_fq_specs(today)
+
+    org_start = last_ws
+    if prev2_first < org_start:
+        org_start = prev2_first
+    if ay_start < org_start:
+        org_start = ay_start
+    ms_oid = _cfg_i(cfg, 'ms_orgid')
+    hs_oid = _cfg_i(cfg, 'hs_orgid')
+    ms_days = _meeting_days_for_orgs([ms_oid], org_start, this_end) if ms_oid > 0 else []
+    hs_days = _meeting_days_for_orgs([hs_oid], org_start, this_end) if hs_oid > 0 else []
+    org_days = _merge_meeting_days(ms_days, hs_days)
+    this_c = _week_present_total(org_days, this_ws, _add_days(this_ws, 7))
+    last_c = _week_present_total(org_days, last_ws, this_ws)
+    this_avg, this_n = _awag_average(org_days, this_first, this_end)
+    last_avg, last_n = _awag_average(org_days, last_first, last_next)
+    prev2_avg, prev2_n = _awag_average(org_days, prev2_first, prev2_next)
+    fq_rows = []
+    for fid, key, sub, start, end in fq_specs:
+        if start >= this_end:
+            fq_rows.append({'id': fid, 'key': key, 'sub': sub, 'avg': None, 'weeks': 0})
+        else:
+            use_end = end
+            if use_end > this_end:
+                use_end = this_end
+            avg, n = _awag_average(org_days, start, use_end)
+            fq_rows.append({'id': fid, 'key': key, 'sub': sub, 'avg': avg, 'weeks': n})
+    ms_avg, ms_n = _awag_average(ms_days, this_first, this_end)
+    hs_avg, hs_n = _awag_average(hs_days, this_first, this_end)
+    ms_last_avg, ms_last_n = _awag_average(ms_days, last_first, last_next)
+    hs_last_avg, hs_last_n = _awag_average(hs_days, last_first, last_next)
+    ms_prev2_avg, ms_prev2_n = _awag_average(ms_days, prev2_first, prev2_next)
+    hs_prev2_avg, hs_prev2_n = _awag_average(hs_days, prev2_first, prev2_next)
+
+    div_ids = _awag_div_ids(cfg)
+    prog_id = _cfg_i(cfg, 'next_gen_program_id') or NEXT_GEN_PROGRAM_ID
+    div_start = ly_ws
+    if ly_this_first < div_start:
+        div_start = ly_this_first
+    if ly_last_first < div_start:
+        div_start = ly_last_first
+    div_days = _meeting_days_for_divs(div_ids, prog_id, div_start, this_end)
+    ly_c = _week_present_total(div_days, ly_ws, _add_days(ly_ws, 7))
+    ly_avg, ly_n = _awag_average(div_days, ly_this_first, ly_this_end)
+    ly_last_avg, ly_last_n = _awag_average(div_days, ly_last_first, ly_last_next)
+
+    this_first_b, this_next_b = _month_bounds(today.year, today.month)
+    this_unique = _attend_unique_count(orgs, this_first_b, this_next_b)
+    last_unique = _attend_unique_count(orgs, last_first, last_next)
+    ms_unique = _attend_unique_count([ms_oid], this_first_b, this_next_b) if ms_oid > 0 else 0
+    hs_unique = _attend_unique_count([hs_oid], this_first_b, this_next_b) if hs_oid > 0 else 0
+    ms_last_unique = _attend_unique_count([ms_oid], last_first, last_next) if ms_oid > 0 else 0
+    hs_last_unique = _attend_unique_count([hs_oid], last_first, last_next) if hs_oid > 0 else 0
     return {
         'this_week': this_c,
         'last_week': last_c,
@@ -946,12 +1525,34 @@ def _attendance_bundle(cfg):
         'last_year_month_avg': ly_avg,
         'month_delta': this_avg - last_avg,
         'month_yoy': this_avg - ly_avg,
+        'last_month_delta': last_avg - prev2_avg,
+        'last_month_yoy': last_avg - ly_last_avg,
         'week_start': this_ws,
         'week_end': _add_days(this_ws, 6),
+        'month_unique': this_unique,
+        'last_month_unique': last_unique,
         'month_weeks': this_n,
         'last_month_weeks': last_n,
         'ly_month_weeks': ly_n,
         'this_week_people': _attend_people(orgs, this_ws, _add_days(this_ws, 7)),
+        'ay_start': ay_start,
+        'fq': fq_rows,
+        'ms_avg': ms_avg,
+        'ms_weeks': ms_n,
+        'ms_unique': ms_unique,
+        'ms_delta': ms_avg - ms_last_avg,
+        'ms_last_avg': ms_last_avg,
+        'ms_last_weeks': ms_last_n,
+        'ms_last_unique': ms_last_unique,
+        'ms_last_delta': ms_last_avg - ms_prev2_avg,
+        'hs_avg': hs_avg,
+        'hs_weeks': hs_n,
+        'hs_unique': hs_unique,
+        'hs_delta': hs_avg - hs_last_avg,
+        'hs_last_avg': hs_last_avg,
+        'hs_last_weeks': hs_last_n,
+        'hs_last_unique': hs_last_unique,
+        'hs_last_delta': hs_last_avg - hs_prev2_avg,
     }
 
 
@@ -968,27 +1569,37 @@ def _event_orgs(cfg):
     exclude = _exclude_orgs(cfg)
     sql = """
 SELECT o.OrganizationId, o.OrganizationName,
-       o.FirstMeetingDate, o.LastMeetingDate, o.CreatedDate,
-       ISNULL(o.MemberCount, 0) AS MemberCount,
-       ISNULL(o.OrganizationStatusId, 0) AS OrganizationStatusId,
-       ISNULL(d.Name, '') AS DivisionName,
-       ISNULL(p.Name, '') AS ProgramName
+    o.FirstMeetingDate, o.LastMeetingDate, o.CreatedDate,
+    ISNULL(o.MemberCount, 0) AS MemberCount,
+    ISNULL(o.OrganizationStatusId, 0) AS OrganizationStatusId,
+    ISNULL(d.Name, '') AS DivisionName,
+    ISNULL(p.Name, '') AS ProgramName,
+    CONVERT(varchar(10), mf.MeetFirst, 23) AS MeetFirst,
+    CONVERT(varchar(10), mf.MeetLast, 23) AS MeetLast
 FROM dbo.Organizations o
 LEFT JOIN dbo.Division d ON o.DivisionId = d.Id
 LEFT JOIN dbo.Program p ON d.ProgId = p.Id
+LEFT JOIN (
+    SELECT m.OrganizationId,
+        MIN(m.MeetingDate) AS MeetFirst,
+        MAX(m.MeetingDate) AS MeetLast
+    FROM dbo.Meetings m
+    WHERE ISNULL(m.DidNotMeet, 0) = 0
+    GROUP BY m.OrganizationId
+) mf ON mf.OrganizationId = o.OrganizationId
 WHERE (
     EXISTS (
         SELECT 1
         FROM dbo.DivOrg do
         INNER JOIN dbo.ProgDiv pd ON pd.DivId = do.DivId
         WHERE do.OrgId = o.OrganizationId
-          AND pd.ProgId = @prog
+        AND pd.ProgId = @prog
     )
     OR EXISTS (
         SELECT 1
         FROM dbo.ProgDiv pd
         WHERE pd.DivId = o.DivisionId
-          AND pd.ProgId = @prog
+        AND pd.ProgId = @prog
     )
     OR ISNULL(d.ProgId, 0) = @prog
 )
@@ -998,17 +1609,17 @@ WHERE (
     if divs:
         frag, names = _sql_in_int(divs, 'div')
         sql += """
- AND (
+AND (
     o.DivisionId IN (""" + frag + """)
     OR EXISTS (
         SELECT 1 FROM dbo.DivOrg do2
         WHERE do2.OrgId = o.OrganizationId
-          AND do2.DivId IN (""" + frag + """)
+        AND do2.DivId IN (""" + frag + """)
     )
- )
+)
 """
         _bind_ids(p, names)
-    sql += ' ORDER BY ISNULL(o.FirstMeetingDate, o.CreatedDate), o.OrganizationName'
+    sql += ' ORDER BY ISNULL(o.FirstMeetingDate, o.CreatedDate) DESC, o.OrganizationName'
     try:
         rows = list(q.QuerySql(sql, p))
     except Exception, ex:
@@ -1022,13 +1633,15 @@ WHERE (
         oid = _i(r.OrganizationId)
         if oid in skip:
             continue
-        first = _parse_date(r.FirstMeetingDate)
-        last = _parse_date(r.LastMeetingDate)
-        created = _parse_date(r.CreatedDate)
+        meet_first = _parse_date_loose(r.MeetFirst) if hasattr(r, 'MeetFirst') else None
+        meet_last = _parse_date_loose(r.MeetLast) if hasattr(r, 'MeetLast') else None
+        first = meet_first or _parse_date_loose(r.FirstMeetingDate)
+        last = meet_last or _parse_date_loose(r.LastMeetingDate)
+        created = _parse_date_loose(r.CreatedDate)
         out.append({
             'id': oid,
             'name': _s(r.OrganizationName),
-            'start': first or created,
+            'start': first or last or created,
             'first': first,
             'last': last,
             'created': created,
@@ -1092,22 +1705,22 @@ def _event_roster_counts(org_ids):
     frag, names = _sql_in_int(ids, 'oid')
     sql = """
 SELECT om.OrganizationId,
-       SUM(CASE
-             WHEN ISNULL(mt.AttendanceTypeId, 0) = 10
-               OR UPPER(LTRIM(RTRIM(ISNULL(mt.Description,'')))) LIKE '%LEADER%'
-             THEN 1 ELSE 0 END) AS LeaderCount,
-       SUM(CASE
-             WHEN ISNULL(mt.AttendanceTypeId, 0) = 10
-               OR UPPER(LTRIM(RTRIM(ISNULL(mt.Description,'')))) LIKE '%LEADER%'
-             THEN 0
-             WHEN ISNULL(mt.AttendanceTypeId, 0) = 30
-               OR UPPER(LTRIM(RTRIM(ISNULL(mt.Description,'')))) LIKE '%MEMBER%'
-             THEN 1 ELSE 0 END) AS MemberCount
+    SUM(CASE
+            WHEN ISNULL(mt.AttendanceTypeId, 0) = 10
+            OR UPPER(LTRIM(RTRIM(ISNULL(mt.Description,'')))) LIKE '%LEADER%'
+            THEN 1 ELSE 0 END) AS LeaderCount,
+    SUM(CASE
+            WHEN ISNULL(mt.AttendanceTypeId, 0) = 10
+            OR UPPER(LTRIM(RTRIM(ISNULL(mt.Description,'')))) LIKE '%LEADER%'
+            THEN 0
+            WHEN ISNULL(mt.AttendanceTypeId, 0) = 30
+            OR UPPER(LTRIM(RTRIM(ISNULL(mt.Description,'')))) LIKE '%MEMBER%'
+            THEN 1 ELSE 0 END) AS MemberCount
 FROM dbo.OrganizationMembers om
 LEFT JOIN lookup.MemberType mt ON mt.Id = om.MemberTypeId
 INNER JOIN dbo.People pe ON pe.PeopleId = om.PeopleId
 WHERE om.OrganizationId IN (""" + frag + """)
-  AND ISNULL(pe.IsDeceased, 0) = 0
+AND ISNULL(pe.IsDeceased, 0) = 0
 GROUP BY om.OrganizationId
 """
     p = _dd()
@@ -1132,17 +1745,18 @@ def _event_enrollments(cfg, events):
     frag, names = _sql_in_int(ids, 'oid')
     sql = """
 SELECT om.PeopleId, om.OrganizationId, o.OrganizationName,
-       ISNULL(pe.Name2, LTRIM(RTRIM(ISNULL(pe.FirstName,'') + ' ' + ISNULL(pe.LastName,'')))) AS PersonName,
-       pe.FirstName, pe.LastName, pe.Age,
-       ISNULL(pe.SchoolOther, '') AS SchoolOther,
-       CASE pe.GenderId WHEN 1 THEN 'Male' WHEN 2 THEN 'Female' ELSE 'Unknown' END AS GenderLabel,
-       ISNULL(gl.Description, 'Unknown') AS GradeLabel
+    ISNULL(pe.Name2, LTRIM(RTRIM(ISNULL(pe.FirstName,'') + ' ' + ISNULL(pe.LastName,'')))) AS PersonName,
+    pe.FirstName, pe.LastName, pe.Age,
+    """ + _sql_school_select() + """,
+    CASE pe.GenderId WHEN 1 THEN 'Male' WHEN 2 THEN 'Female' ELSE 'Unknown' END AS GenderLabel,
+    ISNULL(gl.Description, 'Unknown') AS GradeLabel
 FROM dbo.OrganizationMembers om
 INNER JOIN dbo.Organizations o ON o.OrganizationId = om.OrganizationId
 INNER JOIN dbo.People pe ON pe.PeopleId = om.PeopleId
 LEFT JOIN lookup.GradeLevel gl ON pe.GradeLevelId = gl.Id
+""" + _sql_school_join('pe') + """
 WHERE om.OrganizationId IN (""" + frag + """)
-  AND ISNULL(pe.IsDeceased, 0) = 0
+AND ISNULL(pe.IsDeceased, 0) = 0
 ORDER BY PersonName, o.OrganizationName
 """
     p = _dd()
@@ -1174,17 +1788,18 @@ SELECT DISTINCT
     pe.PeopleId,
     ISNULL(pe.Name2, LTRIM(RTRIM(ISNULL(pe.FirstName,'') + ' ' + ISNULL(pe.LastName,'')))) AS PersonName,
     pe.FirstName, pe.LastName, pe.Age,
-    ISNULL(pe.SchoolOther, '') AS SchoolOther,
+    """ + _sql_school_select() + """,
     CASE pe.GenderId WHEN 1 THEN 'Male' WHEN 2 THEN 'Female' ELSE 'Unknown' END AS GenderLabel,
     ISNULL(gl.Description, 'Unknown') AS GradeLabel,
     pe.BirthDay, pe.BirthMonth
 FROM dbo.OrganizationMembers om
 INNER JOIN dbo.People pe ON pe.PeopleId = om.PeopleId
 LEFT JOIN lookup.GradeLevel gl ON pe.GradeLevelId = gl.Id
+""" + _sql_school_join('pe') + """
 WHERE om.OrganizationId IN (""" + frag + """)
-  AND ISNULL(pe.IsDeceased, 0) = 0
-  AND pe.BirthMonth = @m
-  AND pe.BirthDay IS NOT NULL
+AND ISNULL(pe.IsDeceased, 0) = 0
+AND pe.BirthMonth = @m
+AND pe.BirthDay IS NOT NULL
 ORDER BY pe.BirthDay, PersonName
 """
     p = _dd()
@@ -1215,7 +1830,7 @@ SELECT DISTINCT
     pe.PeopleId,
     ISNULL(pe.Name2, LTRIM(RTRIM(ISNULL(pe.FirstName,'') + ' ' + ISNULL(pe.LastName,'')))) AS PersonName,
     pe.FirstName, pe.LastName, pe.Age,
-    ISNULL(pe.SchoolOther, '') AS SchoolOther,
+    """ + _sql_school_select() + """,
     CASE pe.GenderId WHEN 1 THEN 'Male' WHEN 2 THEN 'Female' ELSE 'Unknown' END AS GenderLabel,
     COALESCE(
         NULLIF(LTRIM(RTRIM(gl_om.Description)), ''),
@@ -1227,8 +1842,8 @@ INNER JOIN dbo.Organizations o ON o.OrganizationId = om.OrganizationId
 LEFT JOIN dbo.Division d ON o.DivisionId = d.Id
 """ + _sql_person_joins() + """
 WHERE o.DivisionId IN (""" + frag + """)
-  AND ISNULL(d.ProgId, 0) = @prog
-  AND ISNULL(pe.IsDeceased, 0) = 0
+AND ISNULL(d.ProgId, 0) = @prog
+AND ISNULL(pe.IsDeceased, 0) = 0
 ORDER BY PersonName
 """
     p = _dd()
@@ -1297,7 +1912,7 @@ SELECT DISTINCT
     pe.PeopleId,
     ISNULL(pe.Name2, LTRIM(RTRIM(ISNULL(pe.FirstName,'') + ' ' + ISNULL(pe.LastName,'')))) AS PersonName,
     pe.FirstName, pe.LastName, pe.Age,
-    ISNULL(pe.SchoolOther, '') AS SchoolOther,
+    """ + _sql_school_select() + """,
     CASE pe.GenderId WHEN 1 THEN 'Male' WHEN 2 THEN 'Female' ELSE 'Unknown' END AS GenderLabel,
     ISNULL(gl.Description, 'Unknown') AS GradeLabel,
     ISNULL(STUFF((
@@ -1306,25 +1921,26 @@ SELECT DISTINCT
         INNER JOIN dbo.Organizations o2 ON o2.OrganizationId = om2.OrganizationId
         LEFT JOIN dbo.Division d2 ON o2.DivisionId = d2.Id
         WHERE om2.PeopleId = pe.PeopleId
-          AND om2.OrganizationId NOT IN (""" + st_frag + """)
-          AND """ + match_sql + """
+        AND om2.OrganizationId NOT IN (""" + st_frag + """)
+        AND """ + match_sql + """
         ORDER BY o2.OrganizationName
         FOR XML PATH(''), TYPE
     ).value('.', 'nvarchar(max)'), 1, 2, ''), '') AS Extra
 FROM dbo.OrganizationMembers om
 INNER JOIN dbo.People pe ON pe.PeopleId = om.PeopleId
 LEFT JOIN lookup.GradeLevel gl ON pe.GradeLevelId = gl.Id
+""" + _sql_school_join('pe') + """
 WHERE om.OrganizationId IN (""" + st_frag + """)
-  AND ISNULL(pe.IsDeceased, 0) = 0
-  AND EXISTS (
-      SELECT 1
-      FROM dbo.OrganizationMembers om2
-      INNER JOIN dbo.Organizations o2 ON o2.OrganizationId = om2.OrganizationId
-      LEFT JOIN dbo.Division d2 ON o2.DivisionId = d2.Id
-      WHERE om2.PeopleId = om.PeopleId
+AND ISNULL(pe.IsDeceased, 0) = 0
+AND EXISTS (
+    SELECT 1
+    FROM dbo.OrganizationMembers om2
+    INNER JOIN dbo.Organizations o2 ON o2.OrganizationId = om2.OrganizationId
+    LEFT JOIN dbo.Division d2 ON o2.DivisionId = d2.Id
+    WHERE om2.PeopleId = om.PeopleId
         AND om2.OrganizationId NOT IN (""" + st_frag + """)
         AND """ + match_sql + """
-  )
+)
 ORDER BY PersonName
 """
     try:
@@ -1344,7 +1960,7 @@ def _discover_subgroups(org_ids):
 SELECT DISTINCT mt.Name
 FROM dbo.MemberTags mt
 WHERE mt.OrgId IN (""" + frag + """)
-  AND LTRIM(RTRIM(ISNULL(mt.Name,''))) <> ''
+AND LTRIM(RTRIM(ISNULL(mt.Name,''))) <> ''
 ORDER BY mt.Name
 """
     p = _dd()
@@ -1358,6 +1974,7 @@ ORDER BY mt.Name
 
 
 def _all_group_names(cfg):
+    """Config order first (newest at top), then any extra SubGroups found on orgs."""
     names = []
     seen = {}
     for n in _group_name_list(cfg) + _discover_subgroups(_standing_orgs(cfg) + _leader_orgs(cfg)):
@@ -1365,7 +1982,6 @@ def _all_group_names(cfg):
         if n and key not in seen:
             seen[key] = True
             names.append(n)
-    names.sort(key=lambda x: x.lower())
     return names
 
 
@@ -1417,21 +2033,95 @@ def _add_people_to_tag(people_ids_raw, tag_name, clear_first):
     }
 
 
+def _user_tag_names():
+    """Personal tags owned by the signed-in user (TypeId 1)."""
+    owner_id = 0
+    try:
+        owner_id = int(model.UserPeopleId)
+    except:
+        owner_id = 0
+    if owner_id <= 0:
+        return []
+    p = _dd()
+    p.AddValue('uid', owner_id)
+    sql = """
+SELECT t.Name
+FROM dbo.Tag t
+WHERE t.PeopleId = @uid
+AND t.TypeId = 1
+AND LTRIM(RTRIM(ISNULL(t.Name,''))) <> ''
+ORDER BY CASE WHEN t.Name LIKE '.%' THEN 1 ELSE 0 END, t.Name
+"""
+    try:
+        rows = list(q.QuerySql(sql, p))
+    except Exception, ex:
+        _warn('user tags: ' + _ex_msg(ex))
+        return []
+    names = []
+    seen = {}
+    for r in rows:
+        n = _s(r.Name)
+        key = n.lower()
+        if n and key not in seen:
+            seen[key] = True
+            names.append(n)
+    return names
+
+
+def _tag_modal_html():
+    names = _user_tag_names()
+    has_tags = len(names) > 0
+    html = '<div class="tag-modal-overlay" id="tag-modal-overlay">'
+    html += '<div class="tag-modal"><div class="tag-modal-header" id="tag-modal-title">Add to Tag</div>'
+    html += '<div class="tag-modal-body"><p class="tag-modal-meta" id="tag-modal-count"></p>'
+    if has_tags:
+        html += '<label class="option-row"><input type="radio" name="tag-source" value="existing" id="tag-source-existing" checked />'
+        html += '<span>Use one of my tags</span></label>'
+        html += '<div id="tag-existing-wrap" class="tag-source-panel">'
+        html += '<select id="tag-existing-select"><option value="">Choose a tag</option>'
+        for n in names:
+            html += '<option value="' + _html(n) + '">' + _html(n) + '</option>'
+        html += '</select></div>'
+        html += '<label class="option-row"><input type="radio" name="tag-source" value="new" id="tag-source-new" />'
+        html += '<span>Create a new tag</span></label>'
+    else:
+        html += '<label class="option-row"><input type="radio" name="tag-source" value="new" id="tag-source-new" checked />'
+        html += '<span>Create a new tag</span></label>'
+    html += '<div id="tag-new-wrap" class="tag-source-panel"'
+    if has_tags:
+        html += ' style="display:none"'
+    html += '>'
+    html += '<input type="text" id="tag-name-input" maxlength="50" autocomplete="off" placeholder="New tag name" />'
+    html += '</div>'
+    html += '<div class="tag-modal-options">'
+    html += '<label class="option-row"><input type="radio" name="tag-mode" value="append" checked />'
+    html += '<span>Append — keep anyone already on the tag</span></label>'
+    html += '<label class="option-row"><input type="radio" name="tag-mode" value="clear" />'
+    html += '<span>Clear first — empty the tag, then add only this list</span></label>'
+    html += '<label class="option-row"><input type="checkbox" id="tag-open-when-done" checked />'
+    html += '<span>Open the tag in a new tab when done</span></label>'
+    html += '</div></div><div class="tag-modal-footer">'
+    html += '<button type="button" class="btn-secondary" id="btn-tag-cancel">Cancel</button>'
+    html += '<button type="button" class="btn-tag-confirm" id="btn-tag-confirm">Add to Tag</button>'
+    html += '</div></div></div>'
+    return html
+
+
 def _save_config_from_form(cfg):
     if not _is_admin():
         return False, 'Admin only.'
     keys = [
-        'ms_orgid', 'hs_orgid', 'week_start_dow', 'event_program_id',
-        'event_division_ids', 'leaders_orgid', 'student_leaders_orgid',
+        'ms_orgid', 'hs_orgid', 'sunday_attendance_orgid', 'week_start_dow', 'event_program_id',
+        'event_division_ids', 'event_date_extra', 'leaders_orgid', 'student_leaders_orgid',
         'coaches_orgid', 'onboarding_url', 'involvement_dash_url',
         'kw_decision', 'kw_decision_scope', 'kw_stories', 'baptism_scope',
         'next_gen_program_id', 'kids_division_id', 'awana_division_id',
-        'senior_year_orgid',
+        'senior_year_orgid', 'awag_division_ids',
         'volunteer_program_id', 'volunteer_extra_orgids', 'view_only_role',
         'small_group_names', 'header_logo_url',
     ]
     int_keys = {
-        'ms_orgid', 'hs_orgid', 'week_start_dow', 'event_program_id',
+        'ms_orgid', 'hs_orgid', 'sunday_attendance_orgid', 'week_start_dow', 'event_program_id',
         'leaders_orgid', 'student_leaders_orgid', 'coaches_orgid',
         'next_gen_program_id', 'kids_division_id', 'awana_division_id',
         'senior_year_orgid', 'volunteer_program_id',
@@ -1458,7 +2148,7 @@ def _ensure_group_name(cfg, name):
     for n in names:
         if n.lower() == low:
             return True, name
-    names.append(name)
+    names.insert(0, name)
     cfg['small_group_names'] = ', '.join(names)
     if _is_admin() or _can_write(cfg):
         try:
@@ -1468,7 +2158,35 @@ def _ensure_group_name(cfg, name):
     return True, name
 
 
-def _student_org_for_person(cfg, people_id):
+def _reorder_group(cfg, name, delta):
+    """Move a group up (-1) or down (+1) in Config small_group_names."""
+    if not _can_write(cfg):
+        return False, 'View only — cannot reorder.'
+    name = _s(name)
+    names = _all_group_names(cfg)
+    idx = -1
+    i = 0
+    while i < len(names):
+        if names[i].lower() == name.lower():
+            idx = i
+            break
+        i += 1
+    if idx < 0:
+        return False, 'Group not found.'
+    nxt = idx + _i(delta)
+    if nxt < 0 or nxt >= len(names):
+        return True, 'Already at the end.'
+    tmp = names[idx]
+    names[idx] = names[nxt]
+    names[nxt] = tmp
+    cfg['small_group_names'] = ', '.join(names)
+    try:
+        _save_config(cfg)
+    except Exception, ex:
+        return False, 'Save failed: ' + _ex_msg(ex)
+    if _i(delta) < 0:
+        return True, 'Moved up.'
+    return True, 'Moved down.'
     people_id = _i(people_id)
     for oid in _standing_orgs(cfg):
         try:
@@ -1522,6 +2240,38 @@ def _assign_subgroup(cfg, people_id, group_name, replace_from=''):
     return True, 'Assigned to ' + group_name + '.'
 
 
+def _remove_subgroup(cfg, people_id, group_name):
+    if not _can_write(cfg):
+        return False, 'View only — cannot remove.'
+    people_id = _i(people_id)
+    group_name = _s(group_name)
+    if not people_id or not group_name:
+        return False, 'Person and group are required.'
+    targets = []
+    soid = _student_org_for_person(cfg, people_id)
+    if soid:
+        targets.append(soid)
+    for oid in _leader_orgs(cfg):
+        try:
+            if model.InOrg(people_id, oid):
+                targets.append(oid)
+        except:
+            pass
+    if not targets:
+        return False, 'Person is not on a configured Student or Leader involvement.'
+    any_ok = False
+    last = ''
+    for oid in targets:
+        try:
+            model.RemoveSubGroup(people_id, oid, group_name)
+            any_ok = True
+        except Exception, ex:
+            last = _ex_msg(ex)
+    if any_ok:
+        return True, 'Removed from ' + group_name + '.'
+    return False, last or 'Could not remove from group.'
+
+
 def _assign_many(cfg, ids_csv, group_name, replace_from='', add_only=False):
     ids = _parse_people_ids(ids_csv)
     if not ids:
@@ -1539,13 +2289,36 @@ def _assign_many(cfg, ids_csv, group_name, replace_from='', add_only=False):
     return False, last or 'No assignments.'
 
 
+def _remove_many(cfg, ids_csv, group_name):
+    ids = _parse_people_ids(ids_csv)
+    if not ids:
+        return False, 'Select at least one person.'
+    group_name = _s(group_name)
+    if not group_name:
+        return False, 'Choose a group to remove from.'
+    ok_n = 0
+    last = ''
+    for pid in ids:
+        ok, msg = _remove_subgroup(cfg, pid, group_name)
+        last = msg
+        if ok:
+            ok_n += 1
+    if ok_n:
+        return True, str(ok_n) + ' removed from ' + group_name + '.'
+    return False, last or 'No removals.'
+
+
 # ---------------------------------------------------------------------------
 # HTML helpers
 # ---------------------------------------------------------------------------
 
-def _person_link(person):
+def _person_link(person, first_last=False):
     pid = _i(person.get('people_id'))
-    name = _html(person.get('name') or '(Unknown)')
+    if first_last:
+        fl = (_s(person.get('first')) + ' ' + _s(person.get('last'))).strip()
+        name = _html(fl or person.get('name') or '(Unknown)')
+    else:
+        name = _html(person.get('name') or '(Unknown)')
     if pid <= 0:
         return name
     return '<a href="/Person2/' + str(pid) + '" target="_blank" rel="noopener">' + name + '</a>'
@@ -1577,12 +2350,10 @@ def _tag_add_button(people, suggest, can_write):
 
 def _delta_html(n, kind='int'):
     if kind == 'float':
-        val = float(n)
-        label = ('+' if val > 0 else '') + ('%.1f' % val)
-        nshow = val
+        nshow = _round_half_up(n)
     else:
         nshow = _i(n)
-        label = ('+' if nshow > 0 else '') + str(nshow)
+    label = ('+' if nshow > 0 else '') + str(nshow)
     cls = 'delta-flat'
     if nshow > 0:
         cls = 'delta-up'
@@ -1591,14 +2362,156 @@ def _delta_html(n, kind='int'):
     return '<span class="delta ' + cls + '">' + _html(label) + '</span>'
 
 
+def _att_drill_href(key):
+    return _script_path() + '?view=home&drill=meetings&att=' + _url_enc(key) + '#sm-drill-list'
+
+
+def _att_drill_spec(cfg, key):
+    """title, org_ids, start, end, is_avg for an attendance tile drill."""
+    key = _s(key).lower()
+    today = _today()
+    this_end = _add_days(today, 1)
+    this_first = datetime.date(today.year, today.month, 1)
+    prev_m = today.month - 1
+    prev_y = today.year
+    if prev_m < 1:
+        prev_m = 12
+        prev_y -= 1
+    last_first, last_next = _month_bounds(prev_y, prev_m)
+    all_orgs = _standing_orgs(cfg)
+    ms_oid = _cfg_i(cfg, 'ms_orgid')
+    hs_oid = _cfg_i(cfg, 'hs_orgid')
+    month_name = today.strftime('%B')
+    last_month_name = datetime.date(prev_y, prev_m, 1).strftime('%B')
+    dow = _cfg_i(cfg, 'week_start_dow')
+    if dow <= 0 and dow != 0:
+        dow = 2
+    this_ws = _week_start(today, dow)
+    specs = {
+        'week': ('This week present', all_orgs, this_ws, _add_days(this_ws, 7), False),
+        'last_month': (last_month_name + ' avg attendance', all_orgs, last_first, last_next, True),
+        'month': (month_name + ' avg attendance', all_orgs, this_first, this_end, True),
+        'ms_last': ('Middle School · ' + last_month_name, [ms_oid], last_first, last_next, True),
+        'ms_month': ('Middle School · ' + month_name, [ms_oid], this_first, this_end, True),
+        'hs_last': ('High School · ' + last_month_name, [hs_oid], last_first, last_next, True),
+        'hs_month': ('High School · ' + month_name, [hs_oid], this_first, this_end, True),
+    }
+    for fid, label, sub, start, end in _academic_fq_specs(today):
+        use_end = end
+        if use_end > this_end:
+            use_end = this_end
+        specs[fid] = (label + ' · ' + sub + ' avg attendance', all_orgs, start, use_end, True)
+    return specs.get(key)
+
+
+def _meetings_drill_html(cfg, key):
+    spec = _att_drill_spec(cfg, key)
+    if not spec:
+        return '<div class="empty-state">Unknown attendance drill.</div>'
+    title, orgs, start, end, is_avg = spec
+    meetings = _meetings_for_orgs(orgs, start, end)
+    days = _days_from_meetings(meetings)
+    last_day = _add_days(end, -1) if end else end
+    html = '<p class="meta-line">' + _html(_date_display(start)) + ' – ' + _html(_date_display(last_day))
+    html += ' · Used in Avg = Head Count when entered, else Recorded Attendance. Empty weeks are skipped.</p>'
+    if is_avg:
+        weeks = _awag_week_vals(days, start, end)
+        included = []
+        for w in weeks:
+            if w.get('included'):
+                included.append(_i(w.get('count')))
+        n = len(included)
+        if n > 0:
+            avg_s = str(_round_half_up(float(sum(included)) / float(n)))
+        else:
+            avg_s = '—'
+        html += '<div class="table-scroll"><table class="people-table"><thead><tr>'
+        html += '<th>Week (Sunday)</th><th class="num">Present</th><th>In average</th></tr></thead><tbody>'
+        if not weeks:
+            html += '<tr><td colspan="3">No weeks in this range.</td></tr>'
+        for w in weeks:
+            html += '<tr><td>' + _html(_date_display(w.get('sunday'))) + '</td>'
+            html += '<td class="num">' + str(_i(w.get('count'))) + '</td>'
+            html += '<td>' + ('Yes' if w.get('included') else 'Skipped (0)') + '</td></tr>'
+        html += '</tbody><tfoot><tr><td><strong>Average</strong></td>'
+        html += '<td class="num"><strong>' + avg_s + '</strong></td>'
+        html += '<td>' + str(n) + ' week' + ('s' if n != 1 else '') + '</td></tr></tfoot></table></div>'
+    html += '<div class="list-actions"><p class="meta-line" style="margin:0"><strong>'
+    html += str(len(meetings)) + '</strong> meetings · click a header to sort</p></div>'
+    html += '<div class="table-scroll"><table class="people-table sm-sortable"><thead><tr>'
+    html += '<th class="sm-sort" data-sort="text">Meeting</th>'
+    html += '<th class="sm-sort" data-sort="text">Involvement</th>'
+    html += '<th class="sm-sort num" data-sort="num">Head Count</th>'
+    html += '<th class="sm-sort num" data-sort="num">Recorded Attendance</th>'
+    html += '<th class="sm-sort num" data-sort="num">Used in Avg</th></tr></thead><tbody>'
+    head_sum = 0
+    rec_sum = 0
+    used_sum = 0
+    if not meetings:
+        html += '<tr><td colspan="5">No meetings in this range.</td></tr>'
+    for m in meetings:
+        head_sum += _i(m.get('head'))
+        rec_sum += _i(m.get('recorded'))
+        used_sum += _i(m.get('used'))
+        mid = _i(m.get('meeting_id'))
+        oid = _i(m.get('org_id'))
+        when = _html(_dt_display(m.get('when')))
+        html += '<tr>'
+        if mid > 0:
+            html += '<td><a href="/Meeting/' + str(mid) + '" target="_blank" rel="noopener">' + when + '</a></td>'
+        else:
+            html += '<td>' + when + '</td>'
+        orgn = _html(m.get('org_name'))
+        if oid > 0:
+            html += '<td><a href="/Org/' + str(oid) + '" target="_blank" rel="noopener">' + orgn + '</a></td>'
+        else:
+            html += '<td>' + orgn + '</td>'
+        html += '<td class="num">' + str(_i(m.get('head'))) + '</td>'
+        html += '<td class="num">' + str(_i(m.get('recorded'))) + '</td>'
+        html += '<td class="num">' + str(_i(m.get('used'))) + '</td></tr>'
+    html += '</tbody>'
+    if meetings:
+        html += '<tfoot><tr><td colspan="2"><strong>Total</strong></td>'
+        html += '<td class="num"><strong>' + str(head_sum) + '</strong></td>'
+        html += '<td class="num"><strong>' + str(rec_sum) + '</strong></td>'
+        html += '<td class="num"><strong>' + str(used_sum) + '</strong></td></tr></tfoot>'
+    html += '</table></div>'
+    return html
+
+
+def _month_avg_card(avg, weeks, label, unique, delta, href=''):
+    if _i(weeks) <= 0:
+        val = '—'
+    else:
+        val = _avg_label(avg, weeks)
+    if href:
+        html = '<a class="stat-card" href="' + href + '">'
+    else:
+        html = '<div class="stat-card">'
+    html += '<div class="stat-value">' + val + '</div>'
+    html += '<div class="stat-label">' + _html(label) + '</div>'
+    html += '<div class="stat-sub"><span class="unique-count">' + str(_i(unique)) + '</span> unique · vs last mo '
+    html += _delta_html(delta, 'float') + '</div>'
+    if href:
+        html += '</a>'
+    else:
+        html += '</div>'
+    return html
+
+
 def _filter_people(people, grade='', gender='', q=''):
     grade = _s(grade).lower()
     gender = _s(gender).lower()
     q = _s(q).lower()
     out = []
     for p in people or []:
-        if grade and _s(p.get('grade')).lower() != grade:
-            continue
+        if grade:
+            pg = _s(p.get('grade'))
+            if pg.lower() != grade:
+                gk = _grade_key(pg)
+                fk = _grade_key(grade)
+                if not gk or gk != fk:
+                    continue
         if gender and _s(p.get('gender')).lower() != gender:
             continue
         if q:
@@ -1640,7 +2553,7 @@ def _roster_table(people, extra_label='', can_write=False, tag_suggest='Student 
     html += '<th class="sm-sort" data-sort="text">Gender</th>'
     html += '<th class="sm-sort" data-sort="num">Age</th>'
     if show_school:
-        html += '<th class="sm-sort" data-sort="text">School</th>'
+        html += '<th class="sm-sort" data-sort="text">School District</th>'
     if show_groups:
         html += '<th class="sm-sort" data-sort="text">Groups</th>'
     if show_extra:
@@ -1670,37 +2583,176 @@ def _roster_table(people, extra_label='', can_write=False, tag_suggest='Student 
     return html
 
 
-def _breakdown_cards(counts, view, key_name):
-    html = '<div class="stats-grid compact">'
-    items = list(counts.items())
-    try:
-        items.sort(key=lambda x: (-x[1], _s(x[0]).lower()))
-    except:
-        pass
-    for label, n in items:
-        href = _script_path() + '?view=' + view + '&' + key_name + '=' + model.UrlEncode(_s(label))
-        html += '<a class="stat-card link-card" href="' + href + '">'
-        html += '<div class="stat-value">' + str(_i(n)) + '</div>'
-        html += '<div class="stat-label">' + _html(label) + '</div></a>'
+def _breakdown_cards(counts, view, key_name, title='', anchor='', ordered=None, gray=False):
+    """Tiles for a breakdown. ordered = list of (href_label, display_label, n)."""
+    if ordered is None:
+        items = []
+        for label, n in counts.items():
+            items.append((_s(label), _s(label), _i(n)))
+        try:
+            items.sort(key=lambda x: (-x[2], x[1].lower()))
+        except:
+            pass
+    else:
+        items = ordered
+    grid = '<div class="stats-grid demo-grid">'
     if not items:
-        html += '<div class="stat-card"><div class="stat-value">0</div><div class="stat-label">No data</div></div>'
+        grid += '<div class="stat-card"><div class="stat-label">No data</div>'
+        grid += '<div class="stat-value">0</div></div>'
+    for href_label, display, n in items:
+        href = _script_path() + '?view=' + view + '&' + key_name + '=' + model.UrlEncode(_s(href_label)) + '#sm-filtered-list'
+        grid += '<a class="stat-card link-card" href="' + href + '">'
+        grid += '<div class="stat-label">' + _html(display) + '</div>'
+        grid += '<div class="stat-value">' + str(_i(n)) + '</div></a>'
+    grid += '</div>'
+    if not title:
+        return grid
+    cls = 'demo-row'
+    if gray:
+        cls += ' home-band home-band-b'
+    html = '<div class="' + cls + '"'
+    if anchor:
+        html += ' id="' + _html(anchor) + '"'
+    html += '>'
+    html += '<button type="button" class="demo-row-caret" aria-expanded="true">'
+    html += '<span class="demo-row-title">' + _html(title) + '</span>'
+    html += '<i class="fa fa-caret-up" aria-hidden="true"></i></button>'
+    html += '<div class="demo-row-body">' + grid + '</div></div>'
+    return html
+
+
+def _grade_nth(n):
+    return str(_i(n)) + 'th'
+
+
+def _grade_tile_items(counts, nums):
+    """Fixed-order grade tiles. Display 6th…12th; href uses the live grade label."""
+    by_n = {}
+    for label, c in (counts or {}).items():
+        k = _grade_key(label)
+        if k not in nums:
+            continue
+        if k not in by_n:
+            by_n[k] = [_s(label), 0]
+        by_n[k][1] += _i(c)
+    out = []
+    for n in nums:
+        disp = _grade_nth(n)
+        if n in by_n:
+            out.append((by_n[n][0], disp, by_n[n][1]))
+        else:
+            out.append((disp, disp, 0))
+    return out
+
+
+def _grade_section(counts):
+    html = '<div id="sm-demo-grade">'
+    html += _breakdown_cards(
+        counts, 'demographics', 'grade', 'Middle School', '',
+        _grade_tile_items(counts, [6, 7, 8]), True)
+    html += _breakdown_cards(
+        counts, 'demographics', 'grade', 'High School', '',
+        _grade_tile_items(counts, [9, 10, 11, 12]))
     html += '</div>'
     return html
 
 
-def _age_bucket(age):
-    n = _i(age, -1)
-    if n < 0:
-        return 'Unknown'
-    if n <= 12:
-        return '11–12'
-    if n <= 14:
-        return '13–14'
-    if n <= 16:
-        return '15–16'
-    if n <= 18:
-        return '17–18'
-    return '19+'
+def _pie_point(cx, cy, r, deg):
+    rad = (deg * math.pi) / 180.0
+    return cx + r * math.cos(rad), cy + r * math.sin(rad)
+
+
+def _pie_slice_path(cx, cy, r, start_deg, end_deg):
+    sweep = end_deg - start_deg
+    if sweep <= 0.05:
+        return ''
+    if sweep >= 359.95:
+        return (
+            'M ' + ('%.2f' % cx) + ' ' + ('%.2f' % (cy - r))
+            + ' a ' + ('%.2f' % r) + ' ' + ('%.2f' % r) + ' 0 1 1 0 ' + ('%.2f' % (2 * r))
+            + ' a ' + ('%.2f' % r) + ' ' + ('%.2f' % r) + ' 0 1 1 0 -' + ('%.2f' % (2 * r))
+        )
+    x0, y0 = _pie_point(cx, cy, r, start_deg)
+    x1, y1 = _pie_point(cx, cy, r, end_deg)
+    large = 1 if sweep > 180 else 0
+    return (
+        'M ' + ('%.2f' % cx) + ' ' + ('%.2f' % cy)
+        + ' L ' + ('%.2f' % x0) + ' ' + ('%.2f' % y0)
+        + ' A ' + ('%.2f' % r) + ' ' + ('%.2f' % r) + ' 0 ' + str(large) + ' 1 '
+        + ('%.2f' % x1) + ' ' + ('%.2f' % y1) + ' Z'
+    )
+
+
+def _school_pie(counts):
+    """SVG pie for School District. Slices use Navy / Artisan family colors."""
+    items = list((counts or {}).items())
+    try:
+        items.sort(key=lambda x: (-_i(x[1]), _s(x[0]).lower()))
+    except:
+        pass
+    total = 0
+    for _label, n in items:
+        total += _i(n)
+    colors = [
+        BRAND['navy'], BRAND['artisan'], '#3D5A73', '#C46B68',
+        '#6B8499', '#E89A97', '#1C3348', '#A34441', '#8FA3B5', '#F0B3B1',
+    ]
+    html = '<div class="demo-pie-wrap">'
+    if total <= 0:
+        html += '<div class="empty-state">No school district data</div></div>'
+        return html
+    cx, cy, r = 100.0, 100.0, 88.0
+    html += '<svg class="demo-pie" viewBox="0 0 200 200" role="img" aria-label="School District">'
+    angle = -90.0
+    i = 0
+    legend = '<ul class="demo-pie-legend">'
+    for label, n in items:
+        n = _i(n)
+        if n <= 0:
+            continue
+        sweep = 360.0 * float(n) / float(total)
+        color = colors[i % len(colors)]
+        d = _pie_slice_path(cx, cy, r, angle, angle + sweep)
+        href = _script_path() + '?view=demographics&school=' + model.UrlEncode(_s(label)) + '#sm-filtered-list'
+        pct = int(round(100.0 * float(n) / float(total)))
+        tip = _html(label) + ' · ' + str(n) + ' (' + str(pct) + '%)'
+        if d:
+            html += '<a href="' + href + '"><path d="' + d + '" fill="' + color + '">'
+            html += '<title>' + tip + '</title></path></a>'
+        legend += '<li><a href="' + href + '"><span class="demo-swatch" style="background:' + color + '"></span>'
+        legend += '<span class="demo-pie-name">' + _html(label) + '</span>'
+        legend += '<span class="demo-pie-n">' + str(n) + ' · ' + str(pct) + '%</span></a></li>'
+        angle += sweep
+        i += 1
+    html += '</svg>'
+    legend += '</ul>'
+    html += legend + '</div>'
+    return html
+
+
+def _school_district_block(counts):
+    tiles = _breakdown_cards(counts, 'demographics', 'school', '')
+    html = '<div class="demo-row home-band home-band-b" id="sm-demo-schools">'
+    html += '<button type="button" class="demo-row-caret" aria-expanded="true">'
+    html += '<span class="demo-row-title">School District</span>'
+    html += '<i class="fa fa-caret-up" aria-hidden="true"></i></button>'
+    html += '<div class="demo-row-body">' + tiles + _school_pie(counts) + '</div></div>'
+    return html
+
+
+def _demo_subnav(items=None, aria='Demographics sections'):
+    if not items:
+        items = [
+            ('sm-demo-grade', 'Grade'),
+            ('sm-demo-schools', 'School Districts'),
+            ('sm-demo-birthdays', 'Birthdays'),
+            ('sm-filtered-list', 'Master Roster'),
+        ]
+    html = '<nav class="subtabs demo-subnav" aria-label="' + _html(aria) + '">'
+    for aid, label in items:
+        html += '<a class="dash-tab demo-jump" href="#' + aid + '">' + _html(label) + '</a>'
+    html += '</nav>'
+    return html
 
 
 def _header_hero_html(cfg):
@@ -1749,22 +2801,24 @@ def _view_home(cfg, can_write):
     decisions = _people_with_keywords(
         [_s(cfg.get('kw_decision')), _s(cfg.get('kw_decision_scope'))], True, cfg)
     baptisms = _baptism_people(cfg)
+    stories = _people_with_keywords([_s(cfg.get('kw_stories'))], True, cfg)
     events = _fy_events(cfg)
     uniq, raw, enroll_people = _event_enrollments(cfg, events)
+    fy_unique_attends = _attend_unique_count(_standing_orgs(cfg), fy_s, fy_e)
+    if fy_unique_attends > 0:
+        engaged_pct = int(round(100.0 * float(uniq) / float(fy_unique_attends)))
+        engaged_label = str(engaged_pct) + '%'
+    else:
+        engaged_label = '—'
+    sun_oid = _cfg_i(cfg, 'sunday_attendance_orgid') or SUNDAY_ATTEND_ORGID
+    sun_avg, sun_n = _sunday_headcount_average(sun_oid, fy_s, fy_e)
+    if sun_avg > 0:
+        sunday_pct = int(round(100.0 * float(fy_unique_attends) / sun_avg))
+        sunday_pct_label = str(sunday_pct) + '%'
+    else:
+        sunday_pct_label = '—'
     roster_counts = _event_roster_counts([ev['id'] for ev in events])
-    html = '<div class="cover-head"><h2>Home</h2>'
-    html += '<p class="meta-line">Ministry year ' + _html(_date_display(fy_s)) + ' – ' + _html(_date_display(_add_days(fy_e, -1))) + '</p></div>'
-
-    html += '<div class="home-band home-combo-1">'
-    html += '<div class="stats-grid home-row home-row-hero">'
-    html += '<a class="stat-card stat-hero" href="' + _script_path() + '?view=home&drill=decisions">'
-    html += '<div class="stat-value">' + str(len(decisions)) + '</div>'
-    html += '<div class="stat-label">Decisions (FY)</div></a>'
-    html += '<a class="stat-card stat-hero" href="' + _script_path() + '?view=home&drill=baptisms">'
-    html += '<div class="stat-value">' + str(len(baptisms)) + '</div>'
-    html += '<div class="stat-label">Baptisms (FY)</div></a>'
-    html += '</div></div>'
-
+    serving = _serving_outside(cfg)
     today = _today()
     month_name = today.strftime('%B')
     prev_m = today.month - 1
@@ -1773,65 +2827,150 @@ def _view_home(cfg, can_write):
         prev_m = 12
         prev_y -= 1
     last_month_name = datetime.date(prev_y, prev_m, 1).strftime('%B')
-    html += '<div class="home-band home-combo-2">'
+    html = '<div class="cover-head cover-head-center"><h2>Metrics &amp; Performance</h2>'
+    html += '<p class="meta-line">Ministry year ' + _html(_date_display(fy_s)) + ' – ' + _html(_date_display(_add_days(fy_e, -1))) + '</p></div>'
+    html += _demo_subnav(
+        [('sm-home-attendance', 'Attendance'), ('sm-home-milestones', 'Milestones'),
+        ('sm-home-leaders', 'Leadership'), ('sm-home-events', 'Events')],
+        'Home sections')
+    html += '<div class="home-band home-band-b" id="sm-home-attendance">'
     html += '<div class="home-row">'
-    html += '<h3 class="home-row-title">Attendance</h3>'
+    html += '<h3 class="home-row-title home-row-title-artisan">Attendance</h3>'
     html += '<div class="stats-grid home-row-att">'
-    html += '<a class="stat-card" href="' + _script_path() + '?view=home&drill=attendance">'
+    html += '<a class="stat-card" href="' + _att_drill_href('week') + '">'
     html += '<div class="stat-value">' + str(att['this_week']) + '</div>'
     html += '<div class="stat-label">This week present</div>'
     html += '<div class="stat-sub">WoW ' + _delta_html(att['wow']) + ' · LY week ' + _delta_html(att['yoy_week']) + '</div></a>'
     html += '<div class="home-month-col">'
     html += '<h4 class="home-month-title">' + _html(last_month_name) + '</h4>'
-    html += '<div class="stat-card">'
-    html += '<div class="stat-value">' + ('%.1f' % float(att['last_month_avg'])) + '</div>'
+    html += '<a class="stat-card" href="' + _att_drill_href('last_month') + '">'
+    html += '<div class="stat-value">' + _avg_label(att['last_month_avg']) + '</div>'
     html += '<div class="stat-label">Last month avg attendance</div>'
-    html += '<div class="stat-sub">' + str(_i(att.get('last_month_weeks'))) + ' weeks</div></div>'
+    html += '<div class="stat-sub"><span class="unique-count">' + str(_i(att.get('last_month_unique'))) + '</span> unique · vs last mo '
+    html += _delta_html(att.get('last_month_delta'), 'float')
+    html += ' · vs LY ' + _delta_html(att.get('last_month_yoy'), 'float') + '</div></a>'
     html += '</div>'
     html += '<div class="home-month-col">'
     html += '<h4 class="home-month-title">' + _html(month_name) + '</h4>'
-    html += '<div class="stat-card">'
-    html += '<div class="stat-value">' + ('%.1f' % float(att['month_avg'])) + '</div>'
+    html += '<a class="stat-card" href="' + _att_drill_href('month') + '">'
+    html += '<div class="stat-value">' + _avg_label(att['month_avg']) + '</div>'
     html += '<div class="stat-label">Month avg attendance</div>'
-    html += '<div class="stat-sub">vs last mo ' + _delta_html(att['month_delta'], 'float')
-    html += ' · vs LY ' + _delta_html(att['month_yoy'], 'float') + '</div></div>'
+    html += '<div class="stat-sub"><span class="unique-count">' + str(_i(att.get('month_unique'))) + '</span> unique · vs last mo '
+    html += _delta_html(att['month_delta'], 'float')
+    html += ' · vs LY ' + _delta_html(att['month_yoy'], 'float') + '</div></a>'
+    html += '</div>'
+    html += '<a class="stat-card" href="' + _script_path() + '?view=home&drill=fy_unique#sm-drill-list">'
+    html += '<div class="stat-value">' + sunday_pct_label + '</div>'
+    html += '<div class="stat-label">Percent of Sunday Attendance</div>'
+    html += '<div class="stat-sub"><span class="unique-count">' + str(fy_unique_attends) + '</span> unique / '
+    html += ('%.0f' % float(sun_avg)) + ' avg In-Person Sunday (FY) · ' + str(sun_n) + ' Sundays</div></a>'
+    html += '</div>'
+    html += '<div class="stats-grid home-row-level">'
+    html += '<div class="home-level-col">'
+    html += '<h4 class="home-level-title">Middle School</h4>'
+    html += '<div class="stats-grid home-row-level-months">'
+    html += '<div class="home-month-col"><h4 class="home-month-title">' + _html(last_month_name) + '</h4>'
+    html += _month_avg_card(att.get('ms_last_avg'), att.get('ms_last_weeks'),
+        'Last month avg attendance', att.get('ms_last_unique'),
+        att.get('ms_last_delta'), _att_drill_href('ms_last'))
+    html += '</div>'
+    html += '<div class="home-month-col"><h4 class="home-month-title">' + _html(month_name) + '</h4>'
+    html += _month_avg_card(att.get('ms_avg'), att.get('ms_weeks'),
+        'Month avg attendance', att.get('ms_unique'),
+        att.get('ms_delta'), _att_drill_href('ms_month'))
+    html += '</div></div></div>'
+    html += '<div class="home-level-col">'
+    html += '<h4 class="home-level-title">High School</h4>'
+    html += '<div class="stats-grid home-row-level-months">'
+    html += '<div class="home-month-col"><h4 class="home-month-title">' + _html(last_month_name) + '</h4>'
+    html += _month_avg_card(att.get('hs_last_avg'), att.get('hs_last_weeks'),
+        'Last month avg attendance', att.get('hs_last_unique'),
+        att.get('hs_last_delta'), _att_drill_href('hs_last'))
+    html += '</div>'
+    html += '<div class="home-month-col"><h4 class="home-month-title">' + _html(month_name) + '</h4>'
+    html += _month_avg_card(att.get('hs_avg'), att.get('hs_weeks'),
+        'Month avg attendance', att.get('hs_unique'),
+        att.get('hs_delta'), _att_drill_href('hs_month'))
+    html += '</div></div></div>'
+    html += '</div>'
+    html += '<div class="fq-block demo-row is-collapsed">'
+    html += '<button type="button" class="demo-row-caret fq-caret" aria-expanded="false">'
+    html += '<span class="fq-title">Academic Year FQ Averages</span>'
+    html += '<i class="fa fa-caret-down" aria-hidden="true"></i></button>'
+    html += '<div class="demo-row-body stats-grid home-row-fq">'
+    for fq in (att.get('fq') or []):
+        n = _i(fq.get('weeks'))
+        avg = fq.get('avg')
+        if avg is None or n <= 0:
+            val = '—'
+        else:
+            val = _avg_label(avg, n)
+        html += '<a class="stat-card" href="' + _att_drill_href(_s(fq.get('id') or fq.get('key')).lower()) + '">'
+        html += '<div class="stat-label">' + _html(fq.get('key')) + '</div>'
+        html += '<div class="stat-value">' + val + '</div>'
+        html += '<div class="stat-sub">Academic year · ' + _html(fq.get('sub')) + '</div></a>'
     html += '</div></div>'
-    html += '<p class="meta-line">Week of ' + _html(_date_display(att['week_start'])) + ' – ' + _html(_date_display(att['week_end']))
-    html += ' · last week ' + str(att['last_week']) + ' · last year week ' + str(att['last_year_week']) + '</p>'
+    html += '<p class="meta-line">Week of ' + _html(_date_display(att['week_start'])) + ' – ' + _html(_date_display(att['week_end'])) + '</p>'
     html += '</div></div>'
 
-    html += '<div class="home-band home-combo-1">'
+    html += '<div class="home-band home-band-navy" id="sm-home-milestones">'
+    html += '<div class="home-row">'
+    html += '<div class="cover-head cover-head-center"><h2>Milestones</h2></div>'
+    html += '<div class="stats-grid home-row-hero">'
+    html += '<a class="stat-card stat-hero" href="' + _script_path() + '?view=home&drill=decisions#sm-drill-list">'
+    html += '<div class="stat-value">' + str(len(decisions)) + '</div>'
+    html += '<div class="stat-label">Decisions</div></a>'
+    html += '<a class="stat-card stat-hero" href="' + _script_path() + '?view=home&drill=baptisms#sm-drill-list">'
+    html += '<div class="stat-value">' + str(len(baptisms)) + '</div>'
+    html += '<div class="stat-label">Baptisms</div></a>'
+    html += '<a class="stat-card stat-hero" href="' + _script_path() + '?view=home&drill=stories#sm-drill-list">'
+    html += '<div class="stat-value">' + str(len(stories)) + '</div>'
+    html += '<div class="stat-label">Stories of Transformation</div></a>'
+    html += '</div></div></div>'
+
+    html += '<div class="home-band home-band-a" id="sm-home-leaders">'
     html += '<div class="home-row">'
     html += '<h3 class="home-row-title">Leaders</h3>'
     html += '<div class="stats-grid home-row-leaders">'
-    html += '<a class="stat-card" href="' + _script_path() + '?view=volunteers&list=leaders">'
+    html += '<a class="stat-card" href="' + _script_path() + '?view=volunteers&list=leaders#sm-vol-leaders">'
     html += '<div class="stat-value">' + str(_org_member_count(_cfg_i(cfg, 'leaders_orgid'))) + '</div>'
-    html += '<div class="stat-label">Volunteer leaders</div></a>'
-    html += '<a class="stat-card" href="' + _script_path() + '?view=volunteers&list=students">'
-    html += '<div class="stat-value">' + str(_org_member_count(_cfg_i(cfg, 'student_leaders_orgid'))) + '</div>'
-    html += '<div class="stat-label">Student leaders</div></a>'
-    html += '<a class="stat-card" href="' + _script_path() + '?view=volunteers&list=coaches">'
+    html += '<div class="stat-label">SG Leaders</div></a>'
+    html += '<a class="stat-card" href="' + _script_path() + '?view=volunteers&list=coaches#sm-vol-coaches">'
     html += '<div class="stat-value">' + str(_org_member_count(_cfg_i(cfg, 'coaches_orgid'))) + '</div>'
-    html += '<div class="stat-label">Small Group Coaches</div></a>'
+    html += '<div class="stat-label">SG Coaches</div></a>'
+    html += '<a class="stat-card" href="' + _script_path() + '?view=volunteers&list=students#sm-vol-students">'
+    html += '<div class="stat-value">' + str(_org_member_count(_cfg_i(cfg, 'student_leaders_orgid'))) + '</div>'
+    html += '<div class="stat-label">Student Lead Team</div></a>'
+    html += '<a class="stat-card" href="' + _script_path() + '?view=volunteers&list=campus#sm-vol-campus">'
+    html += '<div class="stat-value">—</div>'
+    html += '<div class="stat-label">Campus Ministry</div></a>'
+    html += '<a class="stat-card" href="' + _script_path() + '?view=volunteers&list=serving#sm-serving-beyond">'
+    html += '<div class="stat-value">' + str(len(serving)) + '</div>'
+    html += '<div class="stat-label">Students Serving Beyond Refuge</div></a>'
     html += '</div></div></div>'
 
-    html += '<div class="home-band home-combo-1">'
+    html += '<div class="home-band home-band-b" id="sm-home-events">'
     html += '<div class="home-row">'
     html += '<h3 class="home-row-title">Events</h3>'
     html += '<div class="stats-grid home-row-events">'
-    html += '<div class="stat-card"><div class="stat-value">' + str(len(events)) + '</div>'
-    html += '<div class="stat-label">Events since July 1</div></div>'
-    html += '<a class="stat-card" href="' + _script_path() + '?view=home&drill=enroll_unique">'
-    html += '<div class="stat-value">' + str(uniq) + '</div>'
-    html += '<div class="stat-label">Unique event enrollments</div></a>'
-    html += '<a class="stat-card" href="' + _script_path() + '?view=home&drill=enroll_raw">'
-    html += '<div class="stat-value">' + str(raw) + '</div>'
-    html += '<div class="stat-label">Raw event enrollments</div></a>'
+    html += '<div class="stat-card"><div class="stat-label">Events since July 1</div>'
+    html += '<div class="stat-value">' + str(len(events)) + '</div></div>'
+    html += '<a class="stat-card" href="' + _script_path() + '?view=home&drill=enroll_unique#sm-drill-list">'
+    html += '<div class="stat-label">Unique event enrollments</div>'
+    html += '<div class="stat-value">' + str(uniq) + '</div></a>'
+    html += '<a class="stat-card" href="' + _script_path() + '?view=home&drill=enroll_raw#sm-drill-list">'
+    html += '<div class="stat-label">Raw event enrollments</div>'
+    html += '<div class="stat-value">' + str(raw) + '</div></a>'
+    html += '<a class="stat-card" href="' + _script_path() + '?view=home&drill=enroll_unique#sm-drill-list">'
+    html += '<div class="stat-label">Percent Engaged in Events</div>'
+    html += '<div class="stat-value">' + engaged_label + '</div>'
+    html += '<div class="stat-sub"><span class="unique-count">' + str(uniq) + '</span> unique enrollments / '
+    html += '<span class="unique-count">' + str(fy_unique_attends) + '</span> unique attends (FY)</div></a>'
     html += '</div></div>'
 
     dash = _s(cfg.get('involvement_dash_url')) or '/PyScriptForm/InvolvementDashboard'
     html += '<div class="vbs-card"><h3>Ministry-year events</h3>'
-    html += '<p class="meta-line">Past events are grey. Upcoming / in-progress are Azure. Name opens the involvement; icon opens Involvement Dashboard.</p>'
+    html += '<p class="meta-line">Past events are grey. Upcoming / in-progress are Navy. When is first–last meeting date. Name opens the involvement; icon opens Involvement Dashboard.</p>'
     html += '<div class="table-scroll"><table class="people-table sm-sortable"><thead><tr>'
     html += '<th class="sm-sort" data-sort="text">Event</th>'
     html += '<th class="sm-sort" data-sort="text">When</th>'
@@ -1840,18 +2979,19 @@ def _view_home(cfg, can_write):
     html += '<th></th></tr></thead><tbody>'
     if not events:
         html += '<tr><td colspan="5"><div class="empty-state">No events in Program 1112 / Division 46 this ministry year. Confirm those Ids on Config, then Refresh.</div></td></tr>'
-    upcoming = []
-    past = []
-    for ev in events:
-        if _event_is_past(ev):
-            past.append(ev)
-        else:
-            upcoming.append(ev)
-    for ev in upcoming + past:
+    ordered = list(events or [])
+    def _ev_when_key(ev):
+        d = ev.get('start') or ev.get('last') or ev.get('created')
+        if d:
+            return d
+        return datetime.date(1, 1, 1)
+    try:
+        ordered.sort(key=_ev_when_key, reverse=True)
+    except:
+        pass
+    for ev in ordered:
         past_cls = ' event-past' if _event_is_past(ev) else ' event-upcoming'
-        when = _date_display(ev.get('start')) or '—'
-        if ev.get('last'):
-            when = when + ' – ' + _date_display(ev.get('last'))
+        when = _when_display(ev)
         counts = roster_counts.get(ev['id']) or {}
         html += '<tr class="' + past_cls + '">'
         html += '<td><a href="/Org/' + str(ev['id']) + '" target="_blank" rel="noopener">' + _html(ev['name']) + '</a></td>'
@@ -1864,16 +3004,28 @@ def _view_home(cfg, can_write):
 
     drill = _s(_form_val('drill'))
     if drill == 'decisions':
-        html += '<div class="vbs-card"><h3>Decisions</h3>'
+        html += '<div class="vbs-card" id="sm-drill-list"><h3>Decisions</h3>'
         html += _roster_table(decisions, 'Note date', can_write, 'SM Decisions', False, True)
         html += '</div>'
     elif drill == 'baptisms':
-        html += '<div class="vbs-card"><h3>Baptisms</h3>'
+        html += '<div class="vbs-card" id="sm-drill-list"><h3>Baptisms</h3>'
         html += _roster_table(baptisms, 'Baptism date', can_write, 'SM Baptisms', False, True)
         html += '</div>'
-    elif drill == 'attendance':
-        html += '<div class="vbs-card"><h3>This week present</h3>'
-        html += _roster_table(att.get('this_week_people') or [], '', can_write, 'SM This Week', False, False)
+    elif drill == 'stories':
+        html += '<div class="vbs-card" id="sm-drill-list"><h3>Stories of Transformation</h3>'
+        html += _roster_table(stories, 'Note date', can_write, 'SM Stories', False, True)
+        html += '</div>'
+    elif drill == 'attendance' or drill == 'meetings':
+        att_key = _s(_form_val('att')) or 'week'
+        spec = _att_drill_spec(cfg, att_key)
+        title = spec[0] if spec else 'Attendance meetings'
+        html += '<div class="vbs-card" id="sm-drill-list"><h3>' + _html(title) + '</h3>'
+        html += _meetings_drill_html(cfg, att_key)
+        html += '</div>'
+    elif drill == 'fy_unique':
+        html += '<div class="vbs-card" id="sm-drill-list"><h3>Unique attends (ministry year)</h3>'
+        html += _roster_table(
+            _attend_people(_standing_orgs(cfg), fy_s, fy_e), '', can_write, 'SM FY Unique', False, False)
         html += '</div>'
     elif drill == 'enroll_unique':
         seen = {}
@@ -1883,63 +3035,83 @@ def _view_home(cfg, can_write):
             if pid not in seen:
                 seen[pid] = True
                 uniq_people.append(p)
-        html += '<div class="vbs-card"><h3>Unique event enrollments</h3>'
+        html += '<div class="vbs-card" id="sm-drill-list"><h3>Unique event enrollments</h3>'
         html += _roster_table(uniq_people, 'Event', can_write, 'SM Event Unique', False, True)
         html += '</div>'
     elif drill == 'enroll_raw':
-        html += '<div class="vbs-card"><h3>Raw event enrollments</h3>'
+        html += '<div class="vbs-card" id="sm-drill-list"><h3>Raw event enrollments</h3>'
         html += _roster_table(enroll_people, 'Event', can_write, 'SM Event Raw', False, True)
         html += '</div>'
     return html
 
 
+def _vol_list_hash(which):
+    hashes = {
+        'leaders': '#sm-vol-leaders',
+        'coaches': '#sm-vol-coaches',
+        'students': '#sm-vol-students',
+        'campus': '#sm-vol-campus',
+        'serving': '#sm-serving-beyond',
+    }
+    return hashes.get(_s(which), '')
+
+
+def _vol_org_card(anchor, title, orgid, can_write, show_grade=False):
+    html = '<div class="vbs-card" id="' + _html(anchor) + '"><h3>' + _html(title)
+    if orgid > 0:
+        html += ' <a href="/Org/' + str(orgid) + '" target="_blank" rel="noopener">#' + str(orgid) + '</a>'
+    html += '</h3>'
+    if orgid <= 0:
+        html += '<div class="empty-state">Set this Involvement # on the Config tab.</div>'
+    else:
+        people = _org_members([orgid])
+        html += _roster_table(
+            people, '', can_write, 'SM ' + title, True, False, False, show_grade, show_grade)
+    html += '</div>'
+    return html
+
+
 def _view_volunteers(cfg, can_write):
-    which = _s(_form_val('list'), 'leaders')
-    boxes = [
-        ('leaders', 'Volunteer Leaders', _cfg_i(cfg, 'leaders_orgid')),
-        ('students', 'Student Leaders', _cfg_i(cfg, 'student_leaders_orgid')),
-        ('coaches', 'Small Group Coaches', _cfg_i(cfg, 'coaches_orgid')),
-    ]
+    serving = _serving_outside(cfg)
     html = '<div class="cover-head"><h2>Volunteers</h2>'
     html += '<p class="meta-line">Current members of the dedicated leader involvements. Onboarding stays in its own tool.</p></div>'
     html += '<div class="cover-cta">'
     html += '<a class="btn-primary" href="' + _html(_s(cfg.get('onboarding_url'))) + '" target="_blank" rel="noopener">Open Volunteer Onboarding</a>'
     html += '</div>'
-    html += '<div class="subtabs">'
-    for key, label, oid in boxes:
-        cls = 'dash-tab' + (' active' if which == key else '')
-        html += '<a class="' + cls + '" href="' + _script_path() + '?view=volunteers&list=' + key + '">' + _html(label) + '</a>'
-    html += '</div>'
-    current = boxes[0]
-    for row in boxes:
-        if row[0] == which:
-            current = row
-    people = _org_members([current[2]]) if current[2] else []
-    html += '<div class="vbs-card"><h3>' + _html(current[1])
-    if current[2]:
-        html += ' <a href="/Org/' + str(current[2]) + '" target="_blank" rel="noopener">#' + str(current[2]) + '</a>'
-    html += '</h3>'
-    if not current[2]:
-        html += '<div class="empty-state">Set this Involvement # on the Config tab.</div>'
-    else:
-        show_gs = which == 'students'
-        html += _roster_table(
-            people, '', can_write, 'SM ' + current[1], True, False, False, show_gs, show_gs)
+    html += _demo_subnav(
+        [
+            ('sm-vol-leaders', 'Volunteer Leaders'),
+            ('sm-vol-coaches', 'SG Coaches'),
+            ('sm-vol-students', 'Student Lead Team'),
+            ('sm-vol-campus', 'Campus Ministry'),
+            ('sm-serving-beyond', 'Students Serving Beyond Refuge'),
+        ],
+        'Volunteers sections')
+    html += _vol_org_card(
+        'sm-vol-leaders', 'Volunteer Leaders', _cfg_i(cfg, 'leaders_orgid'), can_write, False)
+    html += _vol_org_card(
+        'sm-vol-coaches', 'SG Coaches', _cfg_i(cfg, 'coaches_orgid'), can_write, False)
+    html += _vol_org_card(
+        'sm-vol-students', 'Student Lead Team', _cfg_i(cfg, 'student_leaders_orgid'), can_write, True)
+    html += '<div class="vbs-card" id="sm-vol-campus"><h3>Campus Ministry</h3>'
+    html += '<div class="empty-state">Coming next.</div></div>'
+    html += '<div class="vbs-card" id="sm-serving-beyond"><h3>Students Serving Beyond Refuge</h3>'
+    html += '<p class="meta-line">Refuge standing members who are also in Volunteer Program '
+    html += str(VOLUNTEER_PROGRAM_ID) + ' (or extra Org#s). Volunteer involvements are listed per student.</p>'
+    html += _roster_table(serving, 'Volunteer involvements', can_write, 'SM Serving', True, True)
     html += '</div>'
     return html
 
 
 def _view_demographics(cfg, can_write):
-    people = _org_members(_standing_orgs(cfg))
+    people = _org_members(_standing_orgs(cfg), exclude_leaders=True)
     grade_f = _s(_form_val('grade'))
     gender_f = _s(_form_val('gender'))
     school_f = _s(_form_val('school'))
     q = _s(_form_val('q'))
-    ages = {}
     grades = {}
     schools = {}
     for p in people:
-        ages[_age_bucket(p.get('age'))] = ages.get(_age_bucket(p.get('age')), 0) + 1
         g = _s(p.get('grade')) or 'Unknown'
         grades[g] = grades.get(g, 0) + 1
         sch = _s(p.get('school')) or 'Unknown'
@@ -1953,15 +3125,15 @@ def _view_demographics(cfg, can_write):
                 tmp.append(p)
         filtered = tmp
     html = '<div class="cover-head"><h2>Demographics</h2>'
-    html += '<p class="meta-line">Standing Middle School + High School members. School uses People.SchoolOther (audit if empty).</p></div>'
-    html += '<h3>Age</h3>' + _breakdown_cards(ages, 'demographics', 'q')
-    html += '<h3>Grade</h3>' + _breakdown_cards(grades, 'demographics', 'grade')
-    html += '<h3>School</h3>' + _breakdown_cards(schools, 'demographics', 'school')
+    html += '<p class="meta-line">Standing Middle School + High School members, excluding Leader member types. School District uses Extra Value School District.</p></div>'
+    html += _demo_subnav()
+    html += _grade_section(grades)
+    html += _school_district_block(schools)
     bdays = _birthday_people(_standing_orgs(cfg))
-    html += '<div class="vbs-card"><h3>Birthdays this month</h3>'
+    html += '<div class="vbs-card" id="sm-demo-birthdays"><h3>Birthdays this month</h3>'
     html += _roster_table(bdays, 'Birthday', can_write, 'SM Birthdays', False, True)
     html += '</div>'
-    html += '<div class="vbs-card"><h3>Master roster</h3>'
+    html += '<div class="vbs-card" id="sm-filtered-list"><h3>Master roster</h3>'
     html += '<form class="filter-bar" method="get" action="' + _script_path() + '">'
     html += '<input type="hidden" name="view" value="demographics" />'
     html += '<input type="search" name="q" value="' + _html(q) + '" placeholder="Search name" />'
@@ -2035,7 +3207,6 @@ def _view_ministry(cfg, can_write):
         handoff_rate = 1.0 - (float(len(sixth)) / float(denom))
 
     senior_oid = _cfg_i(cfg, 'senior_year_orgid')
-    serving = _serving_outside(cfg)
     pairs = _attrition_pairs(standing)
 
     html = '<div class="cover-head"><h2>Ministry</h2>'
@@ -2054,8 +3225,6 @@ def _view_ministry(cfg, can_write):
         html += '<div class="stat-label">Senior Year of Discipleship</div></div>'
     else:
         html += '<div class="stat-card"><div class="stat-value">—</div><div class="stat-label">Senior Year (placeholder)</div></div>'
-    html += '<div class="stat-card"><div class="stat-value">' + str(len(serving)) + '</div>'
-    html += '<div class="stat-label">Serving outside Refuge</div></div>'
     html += '</div>'
 
     html += '<div class="vbs-card"><h3>Grade-to-grade census</h3>'
@@ -2077,16 +3246,116 @@ def _view_ministry(cfg, can_write):
     html += _roster_table(decisions, 'Note date', can_write, 'SM Decisions', False, True) + '</div>'
     html += '<div class="vbs-card"><h3>Current 6th grade (Refuge)</h3>'
     html += _roster_table(sixth, '', can_write, 'SM 6th', True, False) + '</div>'
-    html += '<div class="vbs-card"><h3>Students serving outside Refuge</h3>'
-    html += '<p class="meta-line">Refuge standing members who are also in Volunteer Program '
-    html += str(VOLUNTEER_PROGRAM_ID) + ' (or extra Org#s). Volunteer involvements are listed per student.</p>'
-    html += _roster_table(serving, 'Volunteer involvements', can_write, 'SM Serving', True, True) + '</div>'
     return html
 
 
 def _person_in_group(person, group_name):
     g = ',' + _s(person.get('groups')).replace(', ', ',').lower() + ','
     return (',' + _s(group_name).lower() + ',') in g
+
+
+def _sort_people(people):
+    out = list(people or [])
+    try:
+        out.sort(key=lambda p: (
+            _s(p.get('last')).lower(),
+            _s(p.get('first')).lower(),
+            _s(p.get('name')).lower(),
+        ))
+    except:
+        pass
+    return out
+
+
+def _gender_counts(people):
+    boys = 0
+    girls = 0
+    for p in people or []:
+        g = _s(p.get('gender')).lower()
+        if g.startswith('m'):
+            boys += 1
+        elif g.startswith('f'):
+            girls += 1
+    return boys, girls
+
+
+def _group_member_table(people):
+    people = _sort_people(people)
+    html = '<div class="table-scroll"><table class="people-table sm-sortable"><thead><tr>'
+    html += '<th class="sm-sort" data-sort="text">First</th>'
+    html += '<th class="sm-sort" data-sort="text">Last</th>'
+    html += '<th class="sm-sort" data-sort="text">Gender</th>'
+    html += '<th class="sm-sort" data-sort="num">Age</th>'
+    html += '<th class="sm-sort" data-sort="text">Grade</th>'
+    html += '<th class="sm-sort" data-sort="text">School District</th>'
+    html += '</tr></thead><tbody>'
+    if not people:
+        html += '<tr><td colspan="6"><div class="empty-state">No students</div></td></tr>'
+    for p in people:
+        first = _s(p.get('first')) or _s(p.get('name'))
+        html += '<tr>'
+        html += '<td>' + _person_link({'people_id': p.get('people_id'), 'name': first}) + '</td>'
+        html += '<td>' + _html(p.get('last')) + '</td>'
+        html += '<td>' + _html(p.get('gender')) + '</td>'
+        html += '<td>' + _html(p.get('age')) + '</td>'
+        html += '<td>' + _html(p.get('grade')) + '</td>'
+        html += '<td>' + _html(p.get('school')) + '</td>'
+        html += '</tr>'
+    html += '</tbody></table></div>'
+    return html
+
+
+def _sg_stat(n, label):
+    return (
+        '<div class="sg-stat"><div class="sg-stat-n">' + str(_i(n)) + '</div>'
+        '<div class="sg-stat-l">' + _html(label) + '</div></div>'
+    )
+
+
+def _group_block_html(gname, leaders, students, can_write, idx=0, total=1):
+    leaders = _sort_people(leaders)
+    students = _sort_people(students)
+    boys, girls = _gender_counts(students)
+    team = len(leaders) + len(students)
+    html = '<div class="sg-block demo-row is-collapsed">'
+    html += '<div class="sg-block-header">'
+    if can_write and total > 1:
+        html += '<form method="post" action="' + _script_path() + '" class="sg-order">'
+        html += '<input type="hidden" name="view" value="groups" />'
+        html += '<input type="hidden" name="group_name" value="' + _html(gname) + '" />'
+        up_dis = ' disabled' if idx <= 0 else ''
+        down_dis = ' disabled' if idx >= total - 1 else ''
+        html += '<button type="submit" name="action" value="sg_up" class="sg-order-btn"' + up_dis
+        html += ' title="Move up" aria-label="Move ' + _html(gname) + ' up">'
+        html += '<i class="fa fa-chevron-up" aria-hidden="true"></i></button>'
+        html += '<button type="submit" name="action" value="sg_down" class="sg-order-btn"' + down_dis
+        html += ' title="Move down" aria-label="Move ' + _html(gname) + ' down">'
+        html += '<i class="fa fa-chevron-down" aria-hidden="true"></i></button>'
+        html += '</form>'
+    html += '<button type="button" class="demo-row-caret sg-caret" aria-expanded="false">'
+    html += '<span class="sg-title">' + _html(gname) + '</span>'
+    html += '<i class="fa fa-caret-down" aria-hidden="true"></i></button>'
+    html += '<div class="sg-stats">'
+    html += _sg_stat(team, 'Team')
+    html += _sg_stat(len(students), 'Students')
+    html += _sg_stat(boys, 'Boys')
+    html += _sg_stat(girls, 'Girls')
+    html += '</div>'
+    html += _tag_add_button(leaders + students, 'SM ' + gname, can_write)
+    html += '</div>'
+    html += '<div class="sg-block-body demo-row-body">'
+    html += '<div class="sg-leader-row"><span class="sg-leader-label">Leaders</span><span>'
+    if leaders:
+        bits = []
+        for p in leaders:
+            bits.append(_person_link(p, True))
+        html += ', '.join(bits)
+    else:
+        html += '<em>No leaders assigned</em>'
+    html += '</span></div>'
+    html += _group_member_table(students)
+    html += '</div></div>'
+    return html
 
 
 def _view_groups(cfg, can_write):
@@ -2100,10 +3369,19 @@ def _view_groups(cfg, can_write):
 
     html = '<div class="cover-head"><h2>Small Groups</h2>'
     html += '<p class="meta-line">Same SubGroup name on student and leader involvements. Assign can add a second group; Move replaces one name.</p></div>'
+    html += _demo_subnav(
+        [('sm-sg-groups', 'Groups'), ('sm-sg-assign', 'Assign')],
+        'Small Groups sections')
 
-    html += '<div class="group-grid">'
+    html += '<div id="sm-sg-groups" class="sg-stack">'
     if not names:
         html += '<div class="empty-state">No groups yet. Create one below.</div>'
+    nlen = 0
+    try:
+        nlen = len(names)
+    except:
+        nlen = 0
+    gi = 0
     for gname in names:
         g_leaders = []
         g_kids = []
@@ -2113,23 +3391,11 @@ def _view_groups(cfg, can_write):
         for p in students:
             if _person_in_group(p, gname):
                 g_kids.append(p)
-        html += '<div class="group-card">'
-        html += '<h3>' + _html(gname) + '</h3>'
-        html += '<p class="meta-line">' + str(len(g_leaders)) + ' leaders · ' + str(len(g_kids)) + ' students</p>'
-        html += '<div class="group-leaders">'
-        if g_leaders:
-            bits = []
-            for p in g_leaders:
-                bits.append(_person_link(p))
-            html += '<p>' + ', '.join(bits) + '</p>'
-        else:
-            html += '<p class="meta-line">No leaders assigned</p>'
-        html += '</div>'
-        html += _tag_add_button(g_leaders + g_kids, 'SM ' + gname, can_write)
-        html += '</div>'
+        html += _group_block_html(gname, g_leaders, g_kids, can_write, gi, nlen)
+        gi += 1
     html += '</div>'
 
-    html += '<div class="vbs-card"><h3>Assign</h3>'
+    html += '<div class="vbs-card" id="sm-sg-assign"><h3>Assign</h3>'
     if not can_write:
         html += '<p class="meta-line">View only — assignments are disabled.</p>'
     html += '<form method="get" action="' + _script_path() + '" class="filter-bar">'
@@ -2157,13 +3423,15 @@ def _view_groups(cfg, can_write):
         html += '<button type="submit" name="action" value="sg_create" class="btn-secondary">Create group</button>'
         html += '<button type="submit" name="action" value="sg_add" class="btn-primary">Add to group</button>'
         html += '<button type="submit" name="action" value="sg_move" class="btn-secondary">Move to group</button>'
+        html += '<button type="submit" name="action" value="sg_remove" class="btn-secondary">Remove from group</button>'
         html += '<label class="option-row"><input type="checkbox" name="add_only" value="1" checked /> Keep existing groups (add)</label>'
     html += '</div>'
-    html += '<p class="meta-line">Select people below. Add keeps other groups. Move clears known group tags on that person, then assigns the new one.</p>'
+    html += '<p class="meta-line">Select people below. Add keeps other groups. Move clears known group tags on that person, then assigns the new one. Remove drops the chosen group only.</p>'
     html += '<h4>Students</h4>'
     html += _roster_table(filtered, '', can_write, 'SM Assign', True, False, True)
     html += '<h4>Leaders (from dedicated involvements)</h4>'
-    html += _roster_table(leaders, '', can_write, 'SM Leaders', True, False, True)
+    html += _roster_table(
+        _org_members(_sg_assign_leader_orgs(cfg)), '', can_write, 'SM Leaders', True, False, True)
     html += '</form></div>'
     return html
 
@@ -2187,16 +3455,20 @@ def _view_config(cfg):
     html += '<div class="vbs-card"><h3>Standing weekly orgs</h3>'
     html += _cfg_field(cfg, 'ms_orgid', 'Middle School Org#')
     html += _cfg_field(cfg, 'hs_orgid', 'High School Org#')
+    html += _cfg_field(cfg, 'sunday_attendance_orgid', 'Sunday in-person attendance Org#', 'FCC default 35 — two Sunday meeting times, head count')
     html += _cfg_field(cfg, 'week_start_dow', 'Week start (0=Mon … 6=Sun)', 'Default 2 = Wednesday')
+    html += _cfg_field(cfg, 'awag_division_ids', 'Average Week at a Glance Division Ids',
+                    'Blank = divisions of the MS/HS orgs. Used for year-over-year (new involvements each year).')
     html += '</div>'
     html += '<div class="vbs-card"><h3>Events (Prog/Div)</h3>'
     html += _cfg_field(cfg, 'event_program_id', 'Next Generation Program Id', 'FCC default 1112 — all Next Gen')
     html += _cfg_field(cfg, 'event_division_ids', 'Event Division Ids (comma-separated)', 'FCC default 46')
+    html += _cfg_field(cfg, 'event_date_extra', 'Event date Extra Value name', 'Not used for When. When uses First/Last meeting dates on the involvement.')
     html += '</div>'
     html += '<div class="vbs-card"><h3>Leader involvements</h3>'
     html += _cfg_field(cfg, 'leaders_orgid', 'Volunteer Leaders Org#')
-    html += _cfg_field(cfg, 'student_leaders_orgid', 'Student Leaders Org#')
-    html += _cfg_field(cfg, 'coaches_orgid', 'Small Group Coaches Org#')
+    html += _cfg_field(cfg, 'coaches_orgid', 'SG Coaches Org#')
+    html += _cfg_field(cfg, 'student_leaders_orgid', 'Student Lead Team Org#')
     html += '</div>'
     html += '<div class="vbs-card"><h3>Keywords &amp; URLs</h3>'
     html += _cfg_field(cfg, 'kw_decision', 'Decision keyword')
@@ -2247,113 +3519,181 @@ def _view_body(view, cfg, can_write):
 
 def _css():
     ny = BRAND['navy']
-    sp = BRAND['spruce']
-    sn = BRAND['snow']
-    ic = BRAND['ice']
-    tb = BRAND['tennis-ball']
+    wt = BRAND['white']
+    gy = BRAND['gray']
+    dg = BRAND['dark-gray']
     ar = BRAND['artisan']
     return (
         '.sm-root{display:block!important;visibility:visible!important;max-width:1400px;margin:0 auto;'
         'padding:20px;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;'
-        'background:' + sn + '!important;color:' + ny + '!important;min-height:240px}'
-        '.dashboard-header{background:' + ny + ';color:#fff!important;padding:18px 24px 16px;border-radius:12px;'
-        'margin:0 auto 12px auto;box-shadow:0 4px 15px rgba(20,40,60,.35);text-align:center;max-width:960px}'
+        'background:' + wt + '!important;color:' + ny + '!important;min-height:240px}'
+        '.dashboard-header{background:' + ny + ';color:' + wt + '!important;padding:18px 24px 16px;border-radius:12px;'
+        'margin:0 auto 12px auto;box-shadow:0 4px 15px rgba(20,40,60,.25);text-align:center;max-width:960px}'
         '.sm-header-hero{text-align:center;margin:0 0 8px 0;line-height:0}'
         '.sm-header-hero img{display:block;margin:0 auto;max-height:110px;max-width:min(92%,720px);'
         'width:auto;height:auto;object-fit:contain}'
-        '.dashboard-header h1{margin:0 0 4px;font-size:18px;font-weight:600;color:#fff!important}'
+        '.dashboard-header h1{margin:0 0 4px;font-size:18px;font-weight:600;color:' + wt + '!important}'
         '.hdr-actions{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:8px;flex-wrap:wrap}'
         '.role-pill{display:inline-block;padding:3px 10px;border-radius:12px;font-size:11px;'
         'font-weight:600;background:rgba(255,255,255,.2);border:1px solid rgba(255,255,255,.35)}'
         '.btn-refresh{display:inline-block;padding:4px 12px;border-radius:12px;font-size:12px;font-weight:700;'
-        'background:#fff;color:' + ny + '!important;text-decoration:none!important;'
+        'background:' + wt + ';color:' + ny + '!important;text-decoration:none!important;'
         'border:1px solid rgba(255,255,255,.55)}'
-        '.btn-refresh:hover{background:' + ic + '}'
-        '.dash-nav{text-align:center;margin:0 0 14px;background:#fff;border:1px solid ' + ic + ';border-radius:10px;'
+        '.btn-refresh:hover{background:' + gy + '}'
+        '.dash-nav{text-align:center;margin:0 0 14px;background:' + wt + ';border:1px solid ' + gy + ';border-radius:10px;'
         'padding:8px 10px;box-shadow:0 1px 4px rgba(20,40,60,.06);position:relative}'
         '.dash-nav-caret{position:absolute;top:4px;right:6px;width:22px;height:22px;border:none;background:transparent;'
-        'color:' + sp + ';cursor:pointer}'
+        'color:' + ny + ';cursor:pointer}'
         '.dash-nav.is-collapsed .dash-nav-body{display:none!important}'
         '.dash-nav-body,.dash-nav-segment,.dash-tabs{text-align:center;justify-content:center}'
         '.dash-nav-segment{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:4px 6px;margin:0 0 4px}'
-        '.dash-tab{display:inline-block;border:1px solid ' + ic + ';background:#fff;color:' + sp + '!important;padding:4px 10px;'
+        '.dash-tab{display:inline-block;border:1px solid ' + gy + ';background:' + wt + ';color:' + ny + '!important;padding:4px 10px;'
         'border-radius:6px;font-weight:600;font-size:12px;text-decoration:none!important;margin:1px 2px}'
-        '.dash-tab:hover{border-color:' + sp + ';color:' + ny + '!important}'
-        '.dash-tab.active{border-color:' + ny + ';background:' + ny + ';color:#fff!important}'
+        '.dash-tab:hover{border-color:' + ny + ';color:' + ny + '!important}'
+        '.dash-tab.active{border-color:' + ny + ';background:' + ny + ';color:' + wt + '!important}'
         '.subtabs{margin:0 0 12px}'
+        '.demo-subnav{text-align:center;position:sticky;top:0;z-index:6;background:' + wt + ';'
+        'padding:8px 10px 10px;margin:0 0 14px;border:1px solid ' + ar + ';border-radius:10px}'
+        '.demo-subnav .dash-tab{margin:3px;border-color:' + ar + '}'
+        '.demo-subnav .dash-tab:hover{border-color:' + ny + ';color:' + ny + '!important}'
+        '.demo-subnav .dash-tab.active{border-color:' + ny + ';background:' + ny + ';color:' + wt + '!important}'
         '.cover-head h2{margin:0 0 4px;color:' + ny + '}'
-        '.meta-line{color:' + sp + ';font-size:13px;margin:4px 0 10px}'
+        '.cover-head-center,.cover-head-center h2,.cover-head-center .meta-line{text-align:center}'
+        '.meta-line{color:' + ny + ';opacity:.7;font-size:13px;margin:4px 0 10px}'
         '.stats-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin:0 0 16px}'
         '.stats-grid.compact{grid-template-columns:repeat(auto-fill,minmax(120px,1fr))}'
         '.home-row{margin:0 0 20px}'
         '.home-band{padding:16px 16px 10px;border-radius:12px;margin:0 0 14px}'
         '.home-band .home-row{margin:0 0 8px}'
         '.home-band .vbs-card{margin:0}'
-        '.home-combo-1{background:' + ic + '}'
-        '.home-combo-1 .home-row-title,.home-combo-1 .home-month-title,'
-        '.home-combo-1 .stat-value,.home-combo-1 .vbs-card h3{color:' + ny + '}'
-        '.home-combo-1 .stat-label,.home-combo-1 .stat-sub,.home-combo-1 .meta-line,'
-        '.home-combo-1 .people-table a,.home-combo-1 .delta-up{color:' + sp + '}'
-        '.home-combo-1 .stat-card.link-card:hover,.home-combo-1 a.stat-card:hover{border-color:' + tb + '}'
-        '.home-combo-1 tr.event-upcoming td:first-child{border-left:4px solid ' + tb + '}'
-        '.home-combo-2{background:' + sn + '}'
-        '.home-combo-2 .home-row-title,.home-combo-2 .home-month-title,'
-        '.home-combo-2 .stat-value,.home-combo-2 .stat-label,.home-combo-2 .stat-sub,'
-        '.home-combo-2 .meta-line,.home-combo-2 .vbs-card h3{color:' + ny + '}'
-        '.home-combo-2 .stat-card{border-color:' + ic + '}'
-        '.home-combo-2 .stat-card.link-card:hover,.home-combo-2 a.stat-card:hover{border-color:' + ar + '}'
-        '.home-combo-2 .delta-down{color:' + ar + '}'
-        '.home-combo-2 .delta-up{color:' + ny + '}'
+        '.home-band-a{background:' + wt + '}'
+        '.home-band-b{background:' + gy + '}'
+        '.home-band-navy{background:' + ny + '}'
+        '.home-band-navy .cover-head h2,.home-band-navy .home-row-title{color:' + wt + '}'
+        '.home-band-navy .meta-line{color:' + wt + ';opacity:.85}'
+        '.home-band-navy .stat-card,.home-band-navy a.stat-card{background:' + wt + '!important;color:' + ny + '!important}'
+        '.home-band-navy .stat-value,.home-band-navy .stat-label{color:' + ny + '!important}'
         '.home-row-title{margin:0 0 8px;color:' + ny + ';font-size:16px}'
-        '.home-row-hero{grid-template-columns:1fr 1fr;gap:12px;margin:0 0 20px}'
-        '.home-row-att{grid-template-columns:1fr 1fr 1fr;align-items:end}'
+        '.home-row-title-artisan{color:' + ar + ';font-weight:700}'
+        '.home-row-hero{grid-template-columns:1fr 1fr 1fr;gap:12px;margin:0 0 20px}'
+        '.home-row-att{grid-template-columns:1fr 1fr 1fr 1fr;align-items:end}'
+        '.home-row-att .stat-card{display:flex;flex-direction:column;justify-content:center;'
+        'box-sizing:border-box;height:144px;min-height:144px;overflow:hidden}'
+        '.home-row-fq{grid-template-columns:repeat(4,1fr);margin:12px 0 10px}'
+        '.home-row-fq .stat-label{color:' + ar + ';margin-top:0;margin-bottom:6px}'
+        '.home-row-level{grid-template-columns:1fr 1fr;margin:12px 0 10px;gap:16px}'
+        '.home-level-col{display:flex;flex-direction:column;min-width:0}'
+        '.home-row-level-months{grid-template-columns:1fr 1fr;margin:0;align-items:end}'
         '.home-month-col{display:flex;flex-direction:column;min-width:0}'
-        '.home-month-title{margin:0 0 6px;color:' + ny + ';font-size:18px;font-weight:700}'
-        '.home-row-events,.home-row-leaders{grid-template-columns:repeat(3,1fr)}'
-        '.stat-card{background:#fff;border:1px solid ' + ic + ';border-radius:10px;padding:12px 14px;box-shadow:0 1px 4px rgba(20,40,60,.04);'
+    '.home-month-title{margin:0 0 6px;color:' + dg + ';font-size:18px;font-weight:700}'
+    '.home-level-title{margin:0 0 6px;color:' + ar + ';font-size:18px;font-weight:700}'
+        '.home-row-events{grid-template-columns:repeat(4,1fr)}'
+        '.demo-row{margin:0 0 16px;width:100%}'
+        '.demo-row-caret{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;'
+        'border:none;background:transparent;padding:0 0 8px;cursor:default;color:' + ny + ';text-align:left}'
+        '.demo-row-title{margin:0;font-size:18px;font-weight:700;color:' + ny + '}'
+        '.demo-row-caret i{display:none;color:' + ny + ';font-size:16px}'
+        '.fq-block{margin:0 0 10px}'
+        '.demo-row-caret.fq-caret{justify-content:center;cursor:pointer;padding:4px 0 8px}'
+    '.fq-title{margin:0;font-size:16px;font-weight:700;color:' + ny + ';text-align:center}'
+        '.demo-row-caret.fq-caret i{display:inline-block;color:' + ny + ';font-size:16px}'
+        '.fq-block.is-collapsed .demo-row-body{display:none!important}'
+        '.fq-block.is-collapsed .fq-caret i{transform:none}'
+        '.fq-block:not(.is-collapsed) .fq-caret i{transform:rotate(180deg)}'
+        '.demo-row-body{width:100%}'
+        '.demo-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(0,1fr));width:100%;gap:10px;margin:0}'
+        '.demo-grid .stat-card{text-align:center;min-width:0}'
+        '.demo-grid .stat-label{color:' + ar + ';margin-top:0;margin-bottom:6px;word-break:break-word}'
+        '.demo-grid .stat-value{color:' + ny + '}'
+        '.demo-pie-wrap{display:flex;align-items:center;justify-content:center;gap:20px;flex-wrap:wrap;margin:14px 0 0}'
+        '.demo-pie{width:220px;height:220px;max-width:100%}'
+        '.demo-pie-legend{list-style:none;margin:0;padding:0;min-width:180px}'
+        '.demo-pie-legend li{margin:0 0 6px}'
+        '.demo-pie-legend a{display:flex;align-items:center;gap:8px;text-decoration:none!important;color:' + ny + '!important;font-size:12px}'
+        '.demo-swatch{width:10px;height:10px;border-radius:2px;flex-shrink:0}'
+        '.demo-pie-name{flex:1;font-weight:600}'
+        '.demo-pie-n{opacity:.7;white-space:nowrap}'
+        '.home-row-leaders{grid-template-columns:repeat(5,1fr)}'
+        '#sm-drill-list{scroll-margin-top:16px}'
+        '#sm-home-attendance,#sm-home-milestones,#sm-home-leaders,#sm-home-events,'
+        '#sm-filtered-list,#sm-demo-grade,#sm-demo-schools,#sm-demo-birthdays,'
+        '#sm-sg-groups,#sm-sg-assign,'
+        '#sm-vol-leaders,#sm-vol-coaches,#sm-vol-students,#sm-vol-campus,'
+        '#sm-serving-beyond{scroll-margin-top:52px}'
+        '.stat-card{background:' + wt + ';border:1px solid #E2E5E8;border-radius:10px;padding:12px 14px;box-shadow:0 1px 4px rgba(20,40,60,.04);'
         'text-decoration:none!important;color:inherit!important;display:block}'
         '.stat-card.stat-hero{padding:28px 20px;text-align:center}'
         '.stat-card.stat-hero .stat-value{font-size:52px}'
         '.stat-card.stat-hero .stat-label{font-size:16px;margin-top:8px}'
-        '.stat-card.link-card:hover{border-color:' + ic + '}'
+        '.stat-card:hover{border-color:' + ar + ';box-shadow:0 0 0 3px ' + ar + '}'
         '.stat-value{font-size:28px;font-weight:700;color:' + ny + ';line-height:1.1}'
-        '.stat-label{font-size:12px;font-weight:600;color:' + sp + ';margin-top:4px}'
-        '.stat-sub{font-size:11px;color:' + sp + ';margin-top:4px}'
-        '.delta-up{color:' + sp + ';font-weight:700}'
+        '.stat-label{font-size:12px;font-weight:600;color:' + ny + ';margin-top:4px}'
+        '.stat-sub{font-size:11px;color:' + ny + ';margin-top:4px}'
+        '.delta-up{color:' + ny + ';font-weight:700}'
         '.delta-down{color:' + ar + ';font-weight:700}'
-        '.delta-flat{color:' + sp + ';font-weight:600}'
-        '.vbs-card{background:#fff;border:1px solid ' + ic + ';border-radius:12px;padding:16px;margin:0 0 16px;'
+        '.delta-flat{color:' + ny + ';opacity:.7;font-weight:600}'
+        '.unique-count{color:' + ar + ';font-weight:700;opacity:1}'
+        '.vbs-card{background:' + wt + ';border:1px solid #E2E5E8;border-radius:12px;padding:16px;margin:0 0 16px;'
         'box-shadow:0 1px 4px rgba(20,40,60,.04)}'
         '.vbs-card h3{margin:0 0 8px;color:' + ny + ';font-size:18px}'
         '.people-table{width:100%;border-collapse:collapse;font-size:13px}'
-        '.people-table th,.people-table td{padding:7px 8px;border-bottom:1px solid ' + ic + ';text-align:left}'
-        '.people-table th{background:' + sn + ';color:' + ny + ';font-size:12px}'
+        '.people-table th,.people-table td{padding:7px 8px;border-bottom:1px solid ' + gy + ';text-align:left}'
+        '.people-table th{background:' + gy + ';color:' + ny + ';font-size:12px}'
+        '.people-table .num{text-align:right}'
         '.sm-sort{cursor:pointer}'
-        '.people-table a{color:' + sp + ';font-weight:600;text-decoration:none}'
+        '.people-table a{color:' + ny + ';font-weight:600;text-decoration:none}'
         '.people-table a:hover{text-decoration:underline}'
         '.table-scroll{overflow-x:auto}'
-        '.empty-state{padding:16px;color:' + sp + ';text-align:center}'
+        '.empty-state{padding:16px;color:' + ny + ';opacity:.65;text-align:center}'
         '.list-actions{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:0 0 8px;flex-wrap:wrap}'
         '.sm-root .btn-primary,.sm-root .btn-secondary,.sm-root .btn-tag-add,.sm-root .btn-tag-confirm{border:none;'
         'border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:13px;'
         'text-decoration:none!important;display:inline-block}'
-        '.sm-root .btn-primary,.sm-root .btn-tag-confirm{background:' + ny + ';color:#fff!important}'
-        '.sm-root .btn-secondary{background:#fff;color:' + ny + '!important;border:1px solid ' + ic + '}'
-        '.sm-root .btn-tag-add{background:' + tb + ';color:' + ny + '!important}'
-        '.icon-btn{color:' + sp + ';font-size:16px;padding:4px}'
-        'tr.event-upcoming td:first-child a{color:' + sp + '}'
-        'tr.event-past{color:' + sp + ';opacity:.65}'
-        'tr.event-past a{color:' + sp + '!important}'
-        '.info-banner{background:' + ic + ';border:1px solid ' + sp + ';color:' + ny + ';padding:10px 12px;border-radius:8px;margin:0 0 12px}'
-        '.info-banner.danger{background:' + sn + ';border-color:' + ar + ';color:' + ar + '}'
+        '.sm-root .btn-primary,.sm-root .btn-tag-confirm{background:' + ny + ';color:' + wt + '!important}'
+        '.sm-root .btn-secondary{background:' + wt + ';color:' + ny + '!important;border:1px solid #E2E5E8}'
+        '.sm-root .btn-tag-add{background:' + gy + ';color:' + ny + '!important}'
+        '.icon-btn{color:' + ny + ';font-size:16px;padding:4px}'
+        'tr.event-upcoming td:first-child{border-left:3px solid ' + ny + '}'
+        'tr.event-upcoming td:first-child a{color:' + ny + '}'
+        'tr.event-past{color:' + ny + ';opacity:.5}'
+        'tr.event-past a{color:' + ny + '!important}'
+        '.info-banner{background:' + gy + ';border:1px solid #E2E5E8;color:' + ny + ';padding:10px 12px;border-radius:8px;margin:0 0 12px}'
+        '.info-banner.danger{background:' + wt + ';border-color:' + ar + ';color:' + ar + '}'
         '.filter-bar,.assign-form .filter-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 12px}'
-        '.filter-bar input,.filter-bar select,.cfg-field input{padding:8px 10px;border:1px solid ' + ic + ';border-radius:8px;font-size:13px}'
+        '.filter-bar input,.filter-bar select,.cfg-field input{padding:8px 10px;border:1px solid #E2E5E8;border-radius:8px;font-size:13px}'
         '.cfg-form .vbs-card{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}'
         '.cfg-form h3{grid-column:1/-1}'
         '.cfg-field{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;color:' + ny + '}'
         '.group-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin:0 0 16px}'
-        '.group-card{background:#fff;border:1px solid ' + ic + ';border-radius:10px;padding:12px}'
+        '.group-card{background:' + wt + ';border:1px solid #E2E5E8;border-radius:10px;padding:12px}'
         '.group-card h3{margin:0 0 4px;color:' + ny + '}'
+        '.sg-stack{display:flex;flex-direction:column;gap:12px;margin:0 0 16px}'
+        '.sg-block{background:' + wt + ';border:1px solid #E2E5E8;border-radius:12px;padding:14px 16px;'
+        'box-shadow:0 1px 4px rgba(20,40,60,.04)}'
+        '.sg-block-header{display:flex;align-items:center;gap:12px;flex-wrap:wrap}'
+        '.sg-order{display:flex;flex-direction:column;gap:2px;margin:0;flex:0 0 auto}'
+        '.sg-order-btn{width:26px;height:20px;padding:0;border:1px solid #E2E5E8;background:' + wt + ';'
+        'color:' + ny + ';border-radius:4px;cursor:pointer;line-height:1;font-size:10px}'
+        '.sg-order-btn:hover{border-color:' + ny + '}'
+        '.sg-order-btn:disabled{opacity:.35;cursor:default}'
+        '.sg-caret{display:flex;align-items:center;gap:8px;border:none;background:transparent;padding:0;'
+        'cursor:pointer;color:' + ny + ';text-align:left;flex:0 1 auto;width:auto}'
+        '.sg-title{margin:0;font-size:18px;font-weight:700;color:' + ny + '}'
+        '.sg-caret i{display:inline-block;color:' + ny + ';font-size:16px}'
+        '.sg-block.is-collapsed .sg-caret i{transform:none}'
+        '.sg-block:not(.is-collapsed) .sg-caret i{transform:rotate(180deg)}'
+        '.sg-block.is-collapsed .sg-block-body{display:none!important}'
+        '.sg-stats{display:grid;grid-template-columns:repeat(4,minmax(70px,1fr));gap:8px;flex:1;min-width:220px}'
+        '.sg-stat{background:' + gy + ';border-radius:8px;text-align:center;padding:8px 6px}'
+        '.sg-stat-n{font-size:20px;font-weight:700;color:' + ny + ';line-height:1.1}'
+        '.sg-stat-l{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:' + ny + ';opacity:.65;margin-top:2px}'
+        '.sg-block-body{margin-top:12px}'
+        '.sg-leader-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:' + gy + ';'
+        'border-radius:8px;padding:8px 12px;margin:0 0 8px;border-left:3px solid ' + ny + '}'
+        '.sg-leader-label{font-size:12px;font-weight:700;color:' + ny + ';min-width:64px}'
+        '.sg-leader-row a{color:' + ny + ';font-weight:600;text-decoration:none}'
+        '.sg-leader-row a:hover{text-decoration:underline}'
+        '.sg-block .btn-tag-add{margin-left:auto}'
         '.cover-cta{margin:0 0 14px}'
         '.sm-root .tag-modal-overlay{display:none!important;position:fixed;inset:0;background:rgba(20,40,60,.45);'
         'z-index:40;align-items:center;justify-content:center}'
@@ -2361,7 +3701,8 @@ def _css():
         '.tag-modal{background:#fff;border-radius:12px;max-width:420px;width:90%;padding:0;box-shadow:0 8px 30px rgba(20,40,60,.2)}'
         '.tag-modal-header{background:' + ny + ';color:#fff;padding:12px 16px;border-radius:12px 12px 0 0;font-weight:700}'
         '.tag-modal-body{padding:14px 16px}'
-        '.tag-modal-body input[type=text]{width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:8px;box-sizing:border-box}'
+        '.tag-modal-body input[type=text],.tag-modal-body select{width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:8px;box-sizing:border-box}'
+        '.tag-source-panel{margin:0 0 10px 24px}'
         '.tag-modal-footer{padding:10px 16px 14px;display:flex;justify-content:flex-end;gap:8px}'
         '.option-row{display:flex;gap:8px;align-items:flex-start;font-size:12px;margin:8px 0;font-weight:500}'
         '@media (max-width:720px){'
@@ -2374,9 +3715,22 @@ def _css():
         '.dash-nav-body,.dash-nav-segment,.dash-tabs{width:100%;text-align:center;justify-content:center}'
         '.dash-tab{margin:3px}'
         '.home-row-hero,.home-row-att,.home-row-events,.home-row-leaders,'
-        '.stats-grid,.stats-grid.compact{grid-template-columns:1fr}'
+        '.home-row-fq,.home-row-level,'
+        '.stats-grid,.stats-grid.compact,.demo-grid{grid-template-columns:1fr}'
+        '.home-row-att .stat-card{height:auto;min-height:128px}'
         '.stat-card.stat-hero{padding:20px 12px}'
         '.stat-card.stat-hero .stat-value{font-size:40px}'
+        '.demo-row-caret{cursor:pointer}'
+        '.demo-row-caret i{display:inline-block}'
+        '.demo-row.is-collapsed .demo-row-body{display:none!important}'
+        '.demo-row.is-collapsed .demo-row-caret i{transform:rotate(180deg)}'
+        '.fq-block.is-collapsed .fq-caret i{transform:none}'
+        '.fq-block:not(.is-collapsed) .fq-caret i{transform:rotate(180deg)}'
+        '.sg-block-header{flex-direction:column;align-items:stretch}'
+        '.sg-stats{grid-template-columns:repeat(2,1fr);min-width:0}'
+        '.sg-block .btn-tag-add{margin-left:0}'
+        '.sg-block.is-collapsed .sg-caret i{transform:none}'
+        '.sg-block:not(.is-collapsed) .sg-caret i{transform:rotate(180deg)}'
         '.group-grid{grid-template-columns:1fr}'
         '.cfg-form .vbs-card{grid-template-columns:1fr}'
         '.filter-bar,.assign-form .filter-bar,.list-actions{flex-direction:column;align-items:stretch}'
@@ -2397,12 +3751,28 @@ def _page_script():
         "function removeClass(el,c){if(!el)return;el.className=(' '+el.className+' ').replace(' '+c+' ',' ').replace(/^\\s+|\\s+$/g,'');}"
         "var pending=[];"
         "function parseIds(csv){var o=[],s={};String(csv||'').split(',').forEach(function(x){var n=parseInt(x,10);if(n>0&&!s[n]){s[n]=1;o.push(n);}});return o;}"
+        "function tagSource(){var r=document.querySelector('input[name=tag-source]:checked');return r?r.value:'new';}"
+        "function syncTagSource(){var src=tagSource();var ew=$('#tag-existing-wrap');var nw=$('#tag-new-wrap');"
+        "if(ew)ew.style.display=src==='existing'?'block':'none';if(nw)nw.style.display=src==='new'?'block':'none';}"
+        "function setTagSource(v){var radios=document.querySelectorAll('input[name=tag-source]');"
+        "for(var i=0;i<radios.length;i++)radios[i].checked=(radios[i].value===v);syncTagSource();}"
         "function openTag(ids,sug){pending=ids||[];if(!pending.length){alert('No people in this list.');return;}"
         "var c=$('#tag-modal-count');if(c)c.textContent=pending.length+' people will be added.';"
-        "var i=$('#tag-name-input');if(i)i.value=sug||'';var o=$('#tag-modal-overlay');if(o)addClass(o,'visible');}"
+        "var i=$('#tag-name-input');if(i)i.value=sug||'';"
+        "var sel=$('#tag-existing-select');var matched=false;"
+        "if(sel&&sug){var sl=String(sug).toLowerCase();for(var oi=0;oi<sel.options.length;oi++){"
+        "if(String(sel.options[oi].value||'').toLowerCase()===sl){sel.selectedIndex=oi;matched=true;break;}}}"
+        "if(sel&&!matched)sel.selectedIndex=0;"
+        "if(matched)setTagSource('existing');else setTagSource('new');"
+        "var o=$('#tag-modal-overlay');if(o)addClass(o,'visible');"
+        "if(matched&&sel)try{sel.focus();}catch(e0){}else if(i)try{i.focus();}catch(e1){}}"
         "function closeTag(){var o=$('#tag-modal-overlay');if(o)removeClass(o,'visible');pending=[];}"
-        "function submitTag(){var i=$('#tag-name-input');var name=i?String(i.value||'').replace(/^\\s+|\\s+$/g,''):'';"
-        "if(!name){alert('Enter a tag name.');return;}if(!pending.length){alert('No people.');return;}"
+        "function submitTag(){var name='';"
+        "if(tagSource()==='existing'){var sel=$('#tag-existing-select');name=sel?String(sel.value||'').replace(/^\\s+|\\s+$/g,''):'';"
+        "if(!name){alert('Choose a tag.');return;}}"
+        "else{var i=$('#tag-name-input');name=i?String(i.value||'').replace(/^\\s+|\\s+$/g,''):'';"
+        "if(!name){alert('Enter a tag name.');return;}}"
+        "if(!pending.length){alert('No people.');return;}"
         "var mode=$('input[name=tag-mode]:checked');var clear=mode&&mode.value==='clear';"
         "var openEl=$('#tag-open-when-done');var openDone=openEl?!!openEl.checked:true;"
         "var ids=pending.join(',');closeTag();"
@@ -2412,13 +3782,27 @@ def _page_script():
         "if(d&&d.error){alert(d.error);return;}if(openDone&&d&&d.tag_url)window.open(d.tag_url,'_blank','noopener');else alert((d&&d.count?d.count:0)+' added.');};"
         "x.send(body);}"
         "document.addEventListener('click',function(e){var t=e.target;"
+        "var order=t;while(order&&order!==document){if(order.className&&(' '+order.className+' ').indexOf(' sg-order ')>=0)return;order=order.parentNode;}"
         "while(t&&t!==document){if(t.className&&(' '+t.className+' ').indexOf(' btn-tag-add ')>=0){e.preventDefault();openTag(parseIds(t.getAttribute('data-people-ids')),t.getAttribute('data-tag-suggest')||'');return;}"
         "if(t.id==='btn-tag-cancel'){e.preventDefault();closeTag();return;}"
         "if(t.id==='btn-tag-confirm'){e.preventDefault();submitTag();return;}"
         "if(t.id==='sm-nav-caret'){e.preventDefault();var n=document.getElementById('sm-dash-nav');if(n){if((' '+n.className+' ').indexOf(' is-collapsed ')>=0)removeClass(n,'is-collapsed');else addClass(n,'is-collapsed');}return;}"
+        "if(t.className&&((' '+t.className+' ').indexOf(' demo-row-caret ')>=0||(' '+t.className+' ').indexOf(' sg-block-header ')>=0||(' '+t.className+' ').indexOf(' sg-stat ')>=0||(' '+t.className+' ').indexOf(' sg-title ')>=0)){e.preventDefault();var row=t;"
+        "while(row&&row!==document){if(row.className&&(' '+row.className+' ').indexOf(' demo-row ')>=0){if((' '+row.className+' ').indexOf(' is-collapsed ')>=0)removeClass(row,'is-collapsed');else addClass(row,'is-collapsed');"
+        "var exp=(' '+row.className+' ').indexOf(' is-collapsed ')<0;var caret=row.querySelector?row.querySelector('.demo-row-caret'):null;if(caret)caret.setAttribute('aria-expanded',exp?'true':'false');return;}row=row.parentNode;}return;}"
+        "if(t.className&&(' '+t.className+' ').indexOf(' demo-jump ')>=0){e.preventDefault();"
+        "var hid=String(t.getAttribute('href')||'').replace(/^#/,'');"
+        "var el=document.getElementById(hid);if(el){var row=el;"
+        "while(row&&row!==document){if(row.className&&(' '+row.className+' ').indexOf(' demo-row ')>=0){removeClass(row,'is-collapsed');break;}row=row.parentNode;}"
+        "var nested=el.querySelectorAll?el.querySelectorAll('.demo-row'):[];"
+        "if(hid==='sm-demo-grade'){for(var ni=0;ni<nested.length;ni++)removeClass(nested[ni],'is-collapsed');}"
+        "var jumps=document.querySelectorAll('.demo-jump');for(var ji=0;ji<jumps.length;ji++){"
+        "if((jumps[ji].getAttribute('href')||'').replace(/^#/,'')===hid)addClass(jumps[ji],'active');else removeClass(jumps[ji],'active');}"
+        "jumpTo(hid);}return;}"
         "if(t.className&&(' '+t.className+' ').indexOf(' sm-sort ')>=0){e.preventDefault();sortTable(t);return;}"
         "t=t.parentNode;}});"
-        "document.addEventListener('change',function(e){if(e.target&&e.target.className&&e.target.className.indexOf('sm-check-all')>=0){"
+        "document.addEventListener('change',function(e){if(e.target&&e.target.name==='tag-source'){syncTagSource();return;}"
+        "if(e.target&&e.target.className&&e.target.className.indexOf('sm-check-all')>=0){"
         "var on=!!e.target.checked;var tbl=e.target.closest?e.target.closest('table'):null;if(!tbl)return;"
         "var boxes=tbl.querySelectorAll('.sm-row-check');for(var i=0;i<boxes.length;i++)boxes[i].checked=on;}});"
         "function sortTable(th){var table=th.parentNode;while(table&&table.tagName!=='TABLE')table=table.parentNode;"
@@ -2432,6 +3816,18 @@ def _page_script():
         "if(kind==='num'){var na=parseFloat(ta)||0,nb=parseFloat(tb)||0;return dir==='asc'?na-nb:nb-na;}"
         "ta=ta.toLowerCase();tb=tb.toLowerCase();if(ta<tb)return dir==='asc'?-1:1;if(ta>tb)return dir==='asc'?1:-1;return 0;});"
         "var tbod=table.tBodies[0];for(var j=0;j<rows.length;j++)tbod.appendChild(rows[j]);}"
+        "function jumpTo(id){if(!id)return;var el=document.getElementById(id);"
+        "if(el)setTimeout(function(){try{el.scrollIntoView({behavior:'smooth',block:'start'});}catch(e3){el.scrollIntoView(true);}},80);}"
+        "var sec='';var qs='';try{qs=window.location.search||'';var m=qs.match(/[?&]section=([^&]+)/);if(m)sec=decodeURIComponent(m[1]);}catch(e2){}"
+        "if(!sec&&window.location.hash)sec=String(window.location.hash).replace(/^#/,'');"
+        "if(sec==='serving')sec='sm-serving-beyond';"
+        "if(!sec){try{if(/[?&]drill=/.test(qs))sec='sm-drill-list';"
+        "else if(/[?&]view=volunteers/.test(qs)){var lm=qs.match(/[?&]list=([^&]+)/);var lk=lm?decodeURIComponent(lm[1]):'';"
+        "if(lk==='coaches')sec='sm-vol-coaches';else if(lk==='students')sec='sm-vol-students';"
+        "else if(lk==='campus')sec='sm-vol-campus';else if(lk==='serving')sec='sm-serving-beyond';"
+        "else if(lk==='leaders')sec='sm-vol-leaders';}"
+        "else if(/[?&](grade|gender|school|q)=/.test(qs)&&/[?&]view=demographics/.test(qs))sec='sm-filtered-list';}catch(e4){}}"
+        "jumpTo(sec);"
         "}catch(err){}}"
         ")();"
     )
@@ -2466,22 +3862,7 @@ def _page(view, cfg, msg, can_write, can_admin, can_access):
         role_label = 'No access'
     html = '<style type="text/css">' + _css() + '</style>'
     html += '<div class="sm-root sm-view-' + _html(view) + '">'
-    html += '<div class="tag-modal-overlay" id="tag-modal-overlay">'
-    html += '<div class="tag-modal"><div class="tag-modal-header" id="tag-modal-title">Add to Tag</div>'
-    html += '<div class="tag-modal-body"><p class="tag-modal-meta" id="tag-modal-count"></p>'
-    html += '<label for="tag-name-input">Tag name</label>'
-    html += '<input type="text" id="tag-name-input" maxlength="50" autocomplete="off" />'
-    html += '<div class="tag-modal-options">'
-    html += '<label class="option-row"><input type="radio" name="tag-mode" value="append" checked />'
-    html += '<span>Append — keep anyone already on the tag</span></label>'
-    html += '<label class="option-row"><input type="radio" name="tag-mode" value="clear" />'
-    html += '<span>Clear first — empty the tag, then add only this list</span></label>'
-    html += '<label class="option-row"><input type="checkbox" id="tag-open-when-done" checked />'
-    html += '<span>Open the tag in a new tab when done</span></label>'
-    html += '</div></div><div class="tag-modal-footer">'
-    html += '<button type="button" class="btn-secondary" id="btn-tag-cancel">Cancel</button>'
-    html += '<button type="button" class="btn-tag-confirm" id="btn-tag-confirm">Add to Tag</button>'
-    html += '</div></div></div>'
+    html += _tag_modal_html()
     html += '<div class="dashboard-header">'
     html += _header_hero_html(cfg)
     html += '<h1>' + _html(APP_TITLE) + '</h1>'
@@ -2542,7 +3923,13 @@ def main():
             if ok:
                 message = 'Group ready: ' + name
             view = 'groups'
-        elif action in ('sg_add', 'sg_move'):
+        elif action in ('sg_up', 'sg_down'):
+            delta = -1
+            if action == 'sg_down':
+                delta = 1
+            ok, message = _reorder_group(cfg, _form_val('group_name'), delta)
+            view = 'groups'
+        elif action in ('sg_add', 'sg_move', 'sg_remove'):
             gname = _s(_form_val('group_name')) or _s(_form_val('new_group'))
             ids = ''
             try:
@@ -2554,12 +3941,15 @@ def main():
                 ids = ''
             if not ids:
                 ids = _form_val('pid')
-            add_only = action == 'sg_add' and _b(_form_val('add_only'))
-            replace = ''
-            if action == 'sg_move':
-                add_only = False
-                replace = '*'
-            ok, message = _assign_many(cfg, ids, gname, replace, add_only)
+            if action == 'sg_remove':
+                ok, message = _remove_many(cfg, ids, gname)
+            else:
+                add_only = action == 'sg_add' and _b(_form_val('add_only'))
+                replace = ''
+                if action == 'sg_move':
+                    add_only = False
+                    replace = '*'
+                ok, message = _assign_many(cfg, ids, gname, replace, add_only)
             view = 'groups'
         elif action == 'add_to_tag':
             result = _add_people_to_tag(_form_val('people_ids'), _form_val('tag_name'), _form_val('clear_first'))
@@ -2577,7 +3967,7 @@ try:
     main()
 except Exception, ex:
     err = (
-        '<div style="background:#F7F4F0;border:2px solid #DD5B58;color:#DD5B58;padding:16px;margin:12px;'
+        '<div style="background:#FFFFFF;border:2px solid #DD5B58;color:#DD5B58;padding:16px;margin:12px;'
         'border-radius:8px;font-family:sans-serif"><strong>Student Ministry Central error</strong>'
         '<pre style="white-space:pre-wrap">' + _html(_ex_msg(ex)) + '\n' + _html(traceback.format_exc()) + '</pre></div>'
     )
