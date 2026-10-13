@@ -2,7 +2,8 @@
 # Script: StudentMinistryCentral.py
 # Purpose: Student Ministry Central. Home (attendance, FY
 #   events, decisions, baptisms, leader tiles), Volunteers, Demographics,
-#   Ministry outcomes, and Small Groups (VBS-style assign). Event detail
+#   Ministry outcomes, and Small Groups (VBS-style groups, RecReg
+#   allergy/contact toggles, landscape Letter print). Event detail
 #   launches Involvement Dashboard; volunteer intake launches Onboarding.
 # Author: Jake Pierson
 # Date: 2026-09-21
@@ -39,6 +40,8 @@ NEXT_GEN_PROGRAM_ID = 1112
 EVENT_DIVISION_ID = 46
 # Volunteer Program — student serving-outside involvements.
 VOLUNTEER_PROGRAM_ID = 1120
+# Volunteer onboarding pipeline involvement (Prospect member type).
+VOLUNTEER_LIST_ORGID = 85
 # Weekly Sunday in-person service attendance (two meeting times, head count).
 SUNDAY_ATTEND_ORGID = 35
 HEADER_LOGO_URL = (
@@ -53,6 +56,7 @@ BRAND = {
     'gray': '#EEF0F2',
     'dark-gray': '#565E66',
     'artisan': '#DD5B58',
+    'azure': '#019CFF',
 }
 
 NAV_TABS_TOP = [
@@ -148,6 +152,29 @@ def _avg_label(avg, weeks=None):
     if avg is None:
         return '—'
     return str(_round_half_up(avg))
+
+
+def _unique_people_count(people):
+    seen = {}
+    n = 0
+    for p in people or []:
+        pid = _i(p.get('people_id'))
+        if pid > 0 and pid not in seen:
+            seen[pid] = True
+            n += 1
+    return n
+
+
+def _student_body_count(cfg):
+    """Standing MS/HS members, excluding Leader member types."""
+    return _unique_people_count(_org_members(_standing_orgs(cfg), exclude_leaders=True))
+
+
+def _body_pct_label(n, body):
+    if _i(body) <= 0:
+        return '—'
+    pct = _round_half_up(100.0 * float(_i(n)) / float(body))
+    return str(pct) + '% of student body'
 
 
 def _b(val):
@@ -486,7 +513,7 @@ def _default_config():
         'event_date_extra': 'Date',
         'leaders_orgid': 0,
         'student_leaders_orgid': 0,
-        'coaches_orgid': 0,
+        'coaches_group_name': 'Refuge Coaches',
         'onboarding_url': '/PyScriptForm/VolunteerOnboardingDashboard',
         'involvement_dash_url': '/PyScriptForm/InvolvementDashboard',
         'kw_decision': 'Decision to Follow Jesus',
@@ -498,9 +525,11 @@ def _default_config():
         'awana_division_id': 0,
         'senior_year_orgid': 0,
         'volunteer_program_id': VOLUNTEER_PROGRAM_ID,
+        'volunteer_list_orgid': VOLUNTEER_LIST_ORGID,
         'volunteer_extra_orgids': '',
         'view_only_role': '',
         'small_group_names': '',
+        'campus_group_names': 'YCI Leadership, FCA Leadership',
         'header_logo_url': HEADER_LOGO_URL,
     }
 
@@ -606,6 +635,8 @@ def _load_config():
             cfg['volunteer_program_id'] = VOLUNTEER_PROGRAM_ID
         if _i(cfg.get('sunday_attendance_orgid'), 0) <= 0:
             cfg['sunday_attendance_orgid'] = SUNDAY_ATTEND_ORGID
+        if _i(cfg.get('volunteer_list_orgid'), 0) <= 0:
+            cfg['volunteer_list_orgid'] = VOLUNTEER_LIST_ORGID
         _CONFIG_LOAD_INFO = status + ' · ' + str(len(raw)) + ' chars'
     else:
         _CONFIG_LOAD_INFO = status + ' · defaults only'
@@ -632,12 +663,11 @@ def _standing_orgs(cfg):
 
 
 def _leader_orgs(cfg):
-    """Small group leaders: Volunteer Leaders + SG Coaches. Not Student Lead Team."""
+    """Combined Refuge Leaders involvement. Coaches are a SubGroup on this org."""
     out = []
-    for key in ('leaders_orgid', 'coaches_orgid'):
-        n = _cfg_i(cfg, key)
-        if n > 0:
-            out.append(n)
+    n = _cfg_i(cfg, 'leaders_orgid')
+    if n > 0:
+        out.append(n)
     return out
 
 
@@ -656,15 +686,39 @@ def _exclude_orgs(cfg):
     return out
 
 
-def _group_name_list(cfg):
+def _named_group_list(raw, fallback=''):
     names = []
     seen = {}
-    for part in _s(cfg.get('small_group_names')).split(','):
+    src = _s(raw)
+    if not src:
+        src = _s(fallback)
+    for part in src.split(','):
         part = part.strip()
         if part and part.lower() not in seen:
             seen[part.lower()] = True
             names.append(part)
     return names
+
+
+def _group_name_list(cfg):
+    return _named_group_list((cfg or {}).get('small_group_names'))
+
+
+def _campus_group_names(cfg):
+    return _named_group_list(
+        (cfg or {}).get('campus_group_names'),
+        'YCI Leadership, FCA Leadership',
+    )
+
+
+def _coaches_group_name(cfg):
+    names = _named_group_list(
+        (cfg or {}).get('coaches_group_name'),
+        'Refuge Coaches',
+    )
+    if names:
+        return names[0]
+    return 'Refuge Coaches'
 
 
 # ---------------------------------------------------------------------------
@@ -742,8 +796,111 @@ def _bind_ids(p, names):
         p.AddValue(nm, val)
 
 
+def _allergy_text_meaningful(text):
+    """True only when MedicalDescription looks like a real allergy note."""
+    t = _s(text).lower()
+    if not t:
+        return False
+    t = ' '.join(t.split())
+    if not t:
+        return False
+    t_bare = t.rstrip('.,;:')
+    ignore = (
+        'none', 'n/a', 'na', 'n.a.', 'n.a', 'no', 'nope', '-', '--', '.',
+        'none known', 'no known', 'no known allergies', 'n/a.', 'nil',
+        'nothing', 'unknown', 'unk',
+        'nka', 'nkda', 'n.k.a', 'n.k.a.', 'n.k.d.a', 'n.k.d.a.',
+        'no allergies', 'no allergy', 'none listed', 'not applicable',
+    )
+    if t in ignore or t_bare in ignore:
+        return False
+    return True
+
+
+def _fmt_phone(raw):
+    """US display: (555) 123-4567. Leaves odd lengths unchanged."""
+    s = _s(raw)
+    if not s:
+        return ''
+    digits = []
+    for ch in s:
+        try:
+            o = ord(ch)
+        except:
+            continue
+        if 48 <= o <= 57:
+            digits.append(ch)
+    d = ''.join(digits)
+    if len(d) == 11 and d[0] == '1':
+        d = d[1:]
+    if len(d) == 10:
+        return '(' + d[0:3] + ') ' + d[3:6] + '-' + d[6:10]
+    if len(d) == 7:
+        return d[0:3] + '-' + d[3:7]
+    return s
+
+
+def _sql_family_phone(alias, gender_id):
+    """OUTER APPLY: cell/home/work for a same-family adult (10=primary, 20=secondary)."""
+    gid = str(_i(gender_id, 0))
+    return """
+OUTER APPLY (
+    SELECT TOP 1
+        COALESCE(
+            NULLIF(LTRIM(RTRIM(ad.CellPhone)), ''),
+            NULLIF(LTRIM(RTRIM(ad.HomePhone)), ''),
+            NULLIF(LTRIM(RTRIM(ad.WorkPhone)), '')
+        ) AS Phone
+    FROM dbo.People ad
+    WHERE ad.FamilyId = pe.FamilyId
+      AND ad.PeopleId <> pe.PeopleId
+      AND ISNULL(ad.IsDeceased, 0) = 0
+      AND ad.PositionInFamilyId IN (10, 20)
+      AND ad.GenderId = """ + gid + """
+    ORDER BY ad.PositionInFamilyId
+) """ + alias + """
+"""
+
+
+def _contact_bit(label, name, phone):
+    name = _s(name)
+    phone = _fmt_phone(phone)
+    if not name and not phone:
+        return ''
+    if name and phone:
+        return label + ': ' + name + ' ' + phone
+    return label + ': ' + (name or phone)
+
+
+def _parents_html(p):
+    bits = []
+    mom = _contact_bit('Mom', p.get('mother'), p.get('mother_phone'))
+    dad = _contact_bit('Dad', p.get('father'), p.get('father_phone'))
+    if mom:
+        bits.append(_html(mom))
+    if dad:
+        bits.append(_html(dad))
+    return '<br />'.join(bits)
+
+
+def _emergency_text(p):
+    em = _s(p.get('em_contact'))
+    phone = _fmt_phone(p.get('em_phone'))
+    if em and phone:
+        return em + ' / ' + phone
+    return em or phone
+
+
+def _allergy_text(p):
+    a = _s(p.get('allergy'))
+    if not _allergy_text_meaningful(a):
+        return ''
+    return a
+
+
 def _person_row(r):
-    return {
+    allergy = _s(r.AllergyText) if hasattr(r, 'AllergyText') else ''
+    rec = {
         'people_id': _i(r.PeopleId),
         'name': _s(r.PersonName, '(Unknown)'),
         'first': _s(r.FirstName) if hasattr(r, 'FirstName') else '',
@@ -753,10 +910,19 @@ def _person_row(r):
         'gender': _s(r.GenderLabel) if hasattr(r, 'GenderLabel') else '',
         'school': _unquote(r.SchoolDistrict) if hasattr(r, 'SchoolDistrict') else '',
         'groups': _s(r.GroupNames) if hasattr(r, 'GroupNames') else '',
+        'member_type': _s(r.MemberTypeName) if hasattr(r, 'MemberTypeName') else '',
         'org_id': _i(r.OrganizationId) if hasattr(r, 'OrganizationId') else 0,
         'org_name': _s(r.OrganizationName) if hasattr(r, 'OrganizationName') else '',
         'extra': _s(r.Extra) if hasattr(r, 'Extra') else '',
+        'allergy': allergy,
+        'mother': _s(r.MotherName) if hasattr(r, 'MotherName') else '',
+        'father': _s(r.FatherName) if hasattr(r, 'FatherName') else '',
+        'mother_phone': _s(r.MotherPhone) if hasattr(r, 'MotherPhone') else '',
+        'father_phone': _s(r.FatherPhone) if hasattr(r, 'FatherPhone') else '',
+        'em_contact': _s(r.EmContact) if hasattr(r, 'EmContact') else '',
+        'em_phone': _s(r.EmPhone) if hasattr(r, 'EmPhone') else '',
     }
+    return rec
 
 
 def _sql_school_expr():
@@ -773,10 +939,19 @@ def _sql_school_select():
 
 
 def _sql_school_join(people_alias='pe'):
+    """One School District Extra Value per person (avoids duplicate roster rows)."""
     return """
-LEFT JOIN dbo.PeopleExtra sx
-ON sx.PeopleId = """ + people_alias + """.PeopleId
-AND LOWER(LTRIM(RTRIM(ISNULL(sx.Field,'')))) = 'school district'
+OUTER APPLY (
+    SELECT TOP 1 sx0.StrValue, sx0.Data
+    FROM dbo.PeopleExtra sx0
+    WHERE sx0.PeopleId = """ + people_alias + """.PeopleId
+      AND LOWER(LTRIM(RTRIM(ISNULL(sx0.Field,'')))) = 'school district'
+    ORDER BY CASE
+        WHEN NULLIF(LTRIM(RTRIM(ISNULL(sx0.StrValue,''))), '') IS NOT NULL THEN 0
+        WHEN NULLIF(LTRIM(RTRIM(ISNULL(sx0.Data,''))), '') IS NOT NULL THEN 1
+        ELSE 2
+    END
+) sx
 """
 
 
@@ -793,7 +968,14 @@ def _sql_person_select():
         NULLIF(LTRIM(RTRIM(gl_om.Description)), ''),
         NULLIF(LTRIM(RTRIM(gl_pe.Description)), ''),
         'Unknown'
-    ) AS GradeLabel
+    ) AS GradeLabel,
+    ISNULL(CAST(rr.MedicalDescription AS nvarchar(max)), '') AS AllergyText,
+    ISNULL(rr.emcontact, '') AS EmContact,
+    ISNULL(rr.emphone, '') AS EmPhone,
+    ISNULL(rr.mname, '') AS MotherName,
+    ISNULL(rr.fname, '') AS FatherName,
+    ISNULL(mother_ph.Phone, '') AS MotherPhone,
+    ISNULL(father_ph.Phone, '') AS FatherPhone
 """
 
 
@@ -802,7 +984,8 @@ def _sql_person_joins():
 INNER JOIN dbo.People pe ON pe.PeopleId = om.PeopleId
 LEFT JOIN lookup.GradeLevel gl_pe ON pe.GradeLevelId = gl_pe.Id
 LEFT JOIN lookup.GradeLevel gl_om ON om.GradeLevelId = gl_om.Id
-""" + _sql_school_join('pe')
+LEFT JOIN dbo.RecReg rr ON rr.PeopleId = pe.PeopleId
+""" + _sql_school_join('pe') + _sql_family_phone('mother_ph', 2) + _sql_family_phone('father_ph', 1)
 
 
 def _org_members(org_ids, extra_where='', exclude_leaders=False):
@@ -810,9 +993,8 @@ def _org_members(org_ids, extra_where='', exclude_leaders=False):
     if not org_ids:
         return []
     frag, names = _sql_in_int(org_ids, 'oid')
-    extra_join = ''
+    extra_join = ' LEFT JOIN lookup.MemberType lmt ON lmt.Id = om.MemberTypeId '
     if exclude_leaders:
-        extra_join = ' LEFT JOIN lookup.MemberType lmt ON lmt.Id = om.MemberTypeId '
         extra_where += """
 AND ISNULL(lmt.AttendanceTypeId, 0) <> 10
 AND UPPER(LTRIM(RTRIM(ISNULL(lmt.Description,'')))) NOT LIKE '%LEADER%'
@@ -822,6 +1004,7 @@ SELECT DISTINCT
 """ + _sql_person_select() + """
     , om.OrganizationId
     , o.OrganizationName
+    , ISNULL(lmt.Description, '') AS MemberTypeName
     , STUFF((
         SELECT ', ' + mt.Name
         FROM dbo.OrgMemMemTags omt
@@ -867,6 +1050,61 @@ AND ISNULL(pe.IsDeceased, 0) = 0
     except Exception, ex:
         _warn('member count: ' + _ex_msg(ex))
     return 0
+
+
+def _prospect_count(org_id):
+    """Living people with Member Type Prospect on an involvement."""
+    org_id = _i(org_id)
+    if org_id <= 0:
+        return 0
+    sql = """
+SELECT COUNT(*) AS Cnt
+FROM dbo.OrganizationMembers om
+INNER JOIN dbo.People pe ON pe.PeopleId = om.PeopleId
+INNER JOIN lookup.MemberType mt ON mt.Id = om.MemberTypeId
+WHERE om.OrganizationId = @oid
+AND ISNULL(pe.IsDeceased, 0) = 0
+AND UPPER(LTRIM(RTRIM(ISNULL(mt.Description,'')))) = 'PROSPECT'
+"""
+    p = _dd()
+    p.AddValue('oid', org_id)
+    try:
+        rows = list(q.QuerySql(sql, p))
+        if rows:
+            return _i(rows[0].Cnt)
+    except Exception, ex:
+        _warn('prospect count: ' + _ex_msg(ex))
+    return 0
+
+
+def _org_names_ordered(org_ids):
+    """OrganizationName values in the same order as org_ids."""
+    org_ids = [n for n in (org_ids or []) if _i(n) > 0]
+    if not org_ids:
+        return []
+    frag, names = _sql_in_int(org_ids, 'oid')
+    sql = """
+SELECT o.OrganizationId, ISNULL(o.OrganizationName, '') AS OrganizationName
+FROM dbo.Organizations o
+WHERE o.OrganizationId IN (""" + frag + """)
+"""
+    p = _dd()
+    _bind_ids(p, names)
+    by_id = {}
+    try:
+        for r in list(q.QuerySql(sql, p)):
+            by_id[_i(r.OrganizationId)] = _s(r.OrganizationName)
+    except Exception, ex:
+        _warn('org names: ' + _ex_msg(ex))
+    out = []
+    seen = {}
+    for oid in org_ids:
+        label = by_id.get(oid) or ('#' + str(oid))
+        key = label.lower()
+        if label and key not in seen:
+            seen[key] = True
+            out.append(label)
+    return out
 
 
 def _keyword_id(desc):
@@ -997,7 +1235,13 @@ ORDER BY pe.BaptismDate, PersonName
         _warn('baptisms: ' + _ex_msg(ex))
         return []
     people = []
+    seen = {}
     for r in rows:
+        pid = _i(r.PeopleId)
+        if pid > 0 and pid in seen:
+            continue
+        if pid > 0:
+            seen[pid] = True
         rec = _person_row(r)
         rec['extra'] = _date_display(r.Extra)
         people.append(rec)
@@ -1038,12 +1282,18 @@ ORDER BY MeetDay
     return out
 
 
-def _attend_unique_count(org_ids, start, end):
-    """Distinct present people in [start, end)."""
+def _attend_unique_count(org_ids, start, end, max_age=None):
+    """Distinct present people in [start, end). max_age: keep Age < max_age."""
     org_ids = [n for n in (org_ids or []) if _i(n) > 0]
     if not org_ids or start is None or end is None:
         return 0
     frag, names = _sql_in_int(org_ids, 'oid')
+    age_sql = ''
+    if max_age is not None:
+        age_sql = """
+AND pe.Age IS NOT NULL
+AND pe.Age < @maxAge
+"""
     sql = """
 SELECT COUNT(DISTINCT a.PeopleId) AS Cnt
 FROM dbo.Attend a
@@ -1053,11 +1303,13 @@ AND a.AttendanceFlag = 1
 AND a.MeetingDate >= @d1
 AND a.MeetingDate < @d2
 AND ISNULL(pe.IsDeceased, 0) = 0
-"""
+""" + age_sql
     p = _dd()
     _bind_ids(p, names)
     p.AddValue('d1', _ymd(start))
     p.AddValue('d2', _ymd(end))
+    if max_age is not None:
+        p.AddValue('maxAge', _i(max_age))
     try:
         rows = list(q.QuerySql(sql, p))
         if rows:
@@ -1776,6 +2028,24 @@ ORDER BY PersonName, o.OrganizationName
     return len(seen), len(people), people
 
 
+def _enrollments_under_age(people, max_age):
+    """Unique / raw / rows for event enrollments with Age < max_age. Drops blank ages."""
+    cap = _i(max_age)
+    out = []
+    seen = {}
+    for p in people or []:
+        age = p.get('age')
+        if age == '' or age is None:
+            continue
+        if _i(age) >= cap:
+            continue
+        out.append(p)
+        pid = _i(p.get('people_id'))
+        if pid > 0:
+            seen[pid] = True
+    return len(seen), len(out), out
+
+
 def _birthday_people(org_ids, month=None):
     if month is None:
         month = _today().month
@@ -1974,14 +2244,27 @@ ORDER BY mt.Name
 
 
 def _all_group_names(cfg):
-    """Config order first (newest at top), then any extra SubGroups found on orgs."""
+    """Student small groups: Config order first, then extra SubGroups. Not Coaches."""
     names = []
     seen = {}
+    skip = _s(_coaches_group_name(cfg)).lower()
     for n in _group_name_list(cfg) + _discover_subgroups(_standing_orgs(cfg) + _leader_orgs(cfg)):
         key = n.lower()
-        if n and key not in seen:
+        if n and key not in seen and key != skip:
             seen[key] = True
             names.append(n)
+    return names
+
+
+def _assign_group_names(cfg):
+    """Assign dropdown: student groups plus the Coaches SubGroup from Config."""
+    names = list(_all_group_names(cfg) or [])
+    seen = {}
+    for n in names:
+        seen[n.lower()] = True
+    coaches = _s(_coaches_group_name(cfg))
+    if coaches and coaches.lower() not in seen:
+        names.append(coaches)
     return names
 
 
@@ -2113,18 +2396,18 @@ def _save_config_from_form(cfg):
     keys = [
         'ms_orgid', 'hs_orgid', 'sunday_attendance_orgid', 'week_start_dow', 'event_program_id',
         'event_division_ids', 'event_date_extra', 'leaders_orgid', 'student_leaders_orgid',
-        'coaches_orgid', 'onboarding_url', 'involvement_dash_url',
+        'coaches_group_name', 'onboarding_url', 'involvement_dash_url',
         'kw_decision', 'kw_decision_scope', 'kw_stories', 'baptism_scope',
         'next_gen_program_id', 'kids_division_id', 'awana_division_id',
         'senior_year_orgid', 'awag_division_ids',
-        'volunteer_program_id', 'volunteer_extra_orgids', 'view_only_role',
-        'small_group_names', 'header_logo_url',
+        'volunteer_program_id', 'volunteer_list_orgid', 'volunteer_extra_orgids', 'view_only_role',
+        'small_group_names', 'campus_group_names', 'header_logo_url',
     ]
     int_keys = {
         'ms_orgid', 'hs_orgid', 'sunday_attendance_orgid', 'week_start_dow', 'event_program_id',
-        'leaders_orgid', 'student_leaders_orgid', 'coaches_orgid',
+        'leaders_orgid', 'student_leaders_orgid',
         'next_gen_program_id', 'kids_division_id', 'awana_division_id',
-        'senior_year_orgid', 'volunteer_program_id',
+        'senior_year_orgid', 'volunteer_program_id', 'volunteer_list_orgid',
     }
     for k in keys:
         val = _form_val(k, _s(cfg.get(k)))
@@ -2132,6 +2415,11 @@ def _save_config_from_form(cfg):
             cfg[k] = _i(val, 0)
         else:
             cfg[k] = val
+    if 'coaches_orgid' in cfg:
+        try:
+            del cfg['coaches_orgid']
+        except:
+            pass
     try:
         _save_config(cfg)
         return True, 'Config saved to ' + CONFIG_CONTENT_NAME + '.'
@@ -2187,6 +2475,9 @@ def _reorder_group(cfg, name, delta):
     if _i(delta) < 0:
         return True, 'Moved up.'
     return True, 'Moved down.'
+
+
+def _student_org_for_person(cfg, people_id):
     people_id = _i(people_id)
     for oid in _standing_orgs(cfg):
         try:
@@ -2534,7 +2825,7 @@ def _unique_values(people, key):
     return out
 
 
-def _roster_table(people, extra_label='', can_write=False, tag_suggest='Student Ministry', show_groups=False, show_extra=False, checkboxes=False, show_grade=True, show_school=True):
+def _roster_table(people, extra_label='', can_write=False, tag_suggest='Student Ministry', show_groups=False, show_extra=False, checkboxes=False, show_grade=True, show_school=True, sg_extras=False, show_member_type=False):
     n = 0
     try:
         n = len(people)
@@ -2546,38 +2837,52 @@ def _roster_table(people, extra_label='', can_write=False, tag_suggest='Student 
     html += '</div>'
     html += '<div class="table-scroll"><table class="people-table sm-sortable"><thead><tr>'
     if checkboxes:
-        html += '<th class="sm-check"><input type="checkbox" class="sm-check-all" title="Select all" /></th>'
+        html += '<th class="sm-check sm-screen-only"><input type="checkbox" class="sm-check-all" title="Select all" /></th>'
     html += '<th class="sm-sort" data-sort="text">Name</th>'
     if show_grade:
         html += '<th class="sm-sort" data-sort="text">Grade</th>'
     html += '<th class="sm-sort" data-sort="text">Gender</th>'
     html += '<th class="sm-sort" data-sort="num">Age</th>'
+    if show_member_type:
+        html += '<th class="sm-sort" data-sort="text">Member type</th>'
     if show_school:
         html += '<th class="sm-sort" data-sort="text">School District</th>'
     if show_groups:
         html += '<th class="sm-sort" data-sort="text">Groups</th>'
     if show_extra:
         html += '<th class="sm-sort" data-sort="text">' + _html(extra_label or 'Detail') + '</th>'
+    if sg_extras:
+        html += '<th class="sm-sort col-allergy" data-sort="text">Allergies</th>'
+        html += '<th class="sm-sort col-contact" data-sort="text">Parents</th>'
+        html += '<th class="sm-sort col-contact" data-sort="text">Emergency</th>'
     html += '</tr></thead><tbody>'
     cols = 3 + (1 if checkboxes else 0) + (1 if show_grade else 0) + (1 if show_school else 0)
-    cols += (1 if show_groups else 0) + (1 if show_extra else 0)
+    cols += (1 if show_groups else 0) + (1 if show_extra else 0) + (1 if show_member_type else 0)
+    if sg_extras:
+        cols += 3
     if not people:
         html += '<tr><td colspan="' + str(cols) + '"><div class="empty-state">No people</div></td></tr>'
     for p in people or []:
         html += '<tr>'
         if checkboxes:
-            html += '<td><input type="checkbox" class="sm-row-check" name="pid" value="' + str(_i(p.get('people_id'))) + '" /></td>'
+            html += '<td class="sm-screen-only"><input type="checkbox" class="sm-row-check" name="pid" value="' + str(_i(p.get('people_id'))) + '" /></td>'
         html += '<td>' + _person_link(p) + '</td>'
         if show_grade:
             html += '<td>' + _html(p.get('grade')) + '</td>'
         html += '<td>' + _html(p.get('gender')) + '</td>'
         html += '<td>' + _html(p.get('age')) + '</td>'
+        if show_member_type:
+            html += '<td>' + _html(p.get('member_type')) + '</td>'
         if show_school:
             html += '<td>' + _html(p.get('school')) + '</td>'
         if show_groups:
             html += '<td>' + _html(p.get('groups')) + '</td>'
         if show_extra:
             html += '<td>' + _html(p.get('extra')) + '</td>'
+        if sg_extras:
+            html += '<td class="col-allergy">' + _html(_allergy_text(p)) + '</td>'
+            html += '<td class="col-contact">' + _parents_html(p) + '</td>'
+            html += '<td class="col-contact">' + _html(_emergency_text(p)) + '</td>'
         html += '</tr>'
     html += '</tbody></table></div>'
     return html
@@ -2805,8 +3110,10 @@ def _view_home(cfg, can_write):
     events = _fy_events(cfg)
     uniq, raw, enroll_people = _event_enrollments(cfg, events)
     fy_unique_attends = _attend_unique_count(_standing_orgs(cfg), fy_s, fy_e)
-    if fy_unique_attends > 0:
-        engaged_pct = int(round(100.0 * float(uniq) / float(fy_unique_attends)))
+    engaged_uniq, _engaged_raw, engaged_people = _enrollments_under_age(enroll_people, 19)
+    engaged_attends = _attend_unique_count(_standing_orgs(cfg), fy_s, fy_e, 19)
+    if engaged_attends > 0:
+        engaged_pct = int(round(100.0 * float(engaged_uniq) / float(engaged_attends)))
         engaged_label = str(engaged_pct) + '%'
     else:
         engaged_label = '—'
@@ -2819,6 +3126,10 @@ def _view_home(cfg, can_write):
         sunday_pct_label = '—'
     roster_counts = _event_roster_counts([ev['id'] for ev in events])
     serving = _serving_outside(cfg)
+    campus = _campus_people(cfg)
+    sg_leaders, sg_coaches = _partition_leaders_and_coaches(cfg)
+    slt_n = _org_member_count(_cfg_i(cfg, 'student_leaders_orgid'))
+    body_n = _student_body_count(cfg)
     today = _today()
     month_name = today.strftime('%B')
     prev_m = today.month - 1
@@ -2933,20 +3244,23 @@ def _view_home(cfg, can_write):
     html += '<h3 class="home-row-title">Leaders</h3>'
     html += '<div class="stats-grid home-row-leaders">'
     html += '<a class="stat-card" href="' + _script_path() + '?view=volunteers&list=leaders#sm-vol-leaders">'
-    html += '<div class="stat-value">' + str(_org_member_count(_cfg_i(cfg, 'leaders_orgid'))) + '</div>'
+    html += '<div class="stat-value">' + str(len(sg_leaders)) + '</div>'
     html += '<div class="stat-label">SG Leaders</div></a>'
     html += '<a class="stat-card" href="' + _script_path() + '?view=volunteers&list=coaches#sm-vol-coaches">'
-    html += '<div class="stat-value">' + str(_org_member_count(_cfg_i(cfg, 'coaches_orgid'))) + '</div>'
+    html += '<div class="stat-value">' + str(len(sg_coaches)) + '</div>'
     html += '<div class="stat-label">SG Coaches</div></a>'
     html += '<a class="stat-card" href="' + _script_path() + '?view=volunteers&list=students#sm-vol-students">'
-    html += '<div class="stat-value">' + str(_org_member_count(_cfg_i(cfg, 'student_leaders_orgid'))) + '</div>'
-    html += '<div class="stat-label">Student Lead Team</div></a>'
+    html += '<div class="stat-value">' + str(slt_n) + '</div>'
+    html += '<div class="stat-label">Student Lead Team</div>'
+    html += '<div class="stat-sub">' + _html(_body_pct_label(slt_n, body_n)) + '</div></a>'
     html += '<a class="stat-card" href="' + _script_path() + '?view=volunteers&list=campus#sm-vol-campus">'
-    html += '<div class="stat-value">—</div>'
-    html += '<div class="stat-label">Campus Ministry</div></a>'
+    html += '<div class="stat-value">' + str(len(campus)) + '</div>'
+    html += '<div class="stat-label">Campus Ministry</div>'
+    html += '<div class="stat-sub">' + _html(_body_pct_label(len(campus), body_n)) + '</div></a>'
     html += '<a class="stat-card" href="' + _script_path() + '?view=volunteers&list=serving#sm-serving-beyond">'
     html += '<div class="stat-value">' + str(len(serving)) + '</div>'
-    html += '<div class="stat-label">Students Serving Beyond Refuge</div></a>'
+    html += '<div class="stat-label">Students Serving Beyond Refuge</div>'
+    html += '<div class="stat-sub">' + _html(_body_pct_label(len(serving), body_n)) + '</div></a>'
     html += '</div></div></div>'
 
     html += '<div class="home-band home-band-b" id="sm-home-events">'
@@ -2961,11 +3275,11 @@ def _view_home(cfg, can_write):
     html += '<a class="stat-card" href="' + _script_path() + '?view=home&drill=enroll_raw#sm-drill-list">'
     html += '<div class="stat-label">Raw event enrollments</div>'
     html += '<div class="stat-value">' + str(raw) + '</div></a>'
-    html += '<a class="stat-card" href="' + _script_path() + '?view=home&drill=enroll_unique#sm-drill-list">'
+    html += '<a class="stat-card" href="' + _script_path() + '?view=home&drill=enroll_engaged#sm-drill-list">'
     html += '<div class="stat-label">Percent Engaged in Events</div>'
     html += '<div class="stat-value">' + engaged_label + '</div>'
-    html += '<div class="stat-sub"><span class="unique-count">' + str(uniq) + '</span> unique enrollments / '
-    html += '<span class="unique-count">' + str(fy_unique_attends) + '</span> unique attends (FY)</div></a>'
+    html += '<div class="stat-sub"><span class="unique-count">' + str(engaged_uniq) + '</span> unique enrollments / '
+    html += '<span class="unique-count">' + str(engaged_attends) + '</span> unique attends (FY) · under 19</div></a>'
     html += '</div></div>'
 
     dash = _s(cfg.get('involvement_dash_url')) or '/PyScriptForm/InvolvementDashboard'
@@ -3038,6 +3352,17 @@ def _view_home(cfg, can_write):
         html += '<div class="vbs-card" id="sm-drill-list"><h3>Unique event enrollments</h3>'
         html += _roster_table(uniq_people, 'Event', can_write, 'SM Event Unique', False, True)
         html += '</div>'
+    elif drill == 'enroll_engaged':
+        seen = {}
+        uniq_people = []
+        for p in engaged_people:
+            pid = _i(p.get('people_id'))
+            if pid not in seen:
+                seen[pid] = True
+                uniq_people.append(p)
+        html += '<div class="vbs-card" id="sm-drill-list"><h3>Percent Engaged · unique enrollments under 19</h3>'
+        html += _roster_table(uniq_people, 'Event', can_write, 'SM Engaged Under 19', False, True)
+        html += '</div>'
     elif drill == 'enroll_raw':
         html += '<div class="vbs-card" id="sm-drill-list"><h3>Raw event enrollments</h3>'
         html += _roster_table(enroll_people, 'Event', can_write, 'SM Event Raw', False, True)
@@ -3056,26 +3381,55 @@ def _vol_list_hash(which):
     return hashes.get(_s(which), '')
 
 
+def _people_n(people):
+    try:
+        return len(people or [])
+    except:
+        return 0
+
+
+def _vol_card_open(anchor, title, count=0):
+    html = '<div class="vbs-card vol-fold demo-row is-collapsed" id="' + _html(anchor) + '">'
+    html += '<div class="vol-fold-head">'
+    html += '<span class="vol-fold-count">' + str(_i(count)) + '</span>'
+    html += '<span class="demo-row-title">' + _html(title) + '</span>'
+    html += '<button type="button" class="demo-row-caret" aria-expanded="false" aria-label="Expand ' + _html(title) + '">'
+    html += '<i class="fa fa-caret-down" aria-hidden="true"></i></button>'
+    html += '</div><div class="demo-row-body">'
+    return html
+
+
+def _vol_card_close():
+    return '</div></div>'
+
+
 def _vol_org_card(anchor, title, orgid, can_write, show_grade=False):
-    html = '<div class="vbs-card" id="' + _html(anchor) + '"><h3>' + _html(title)
+    people = []
     if orgid > 0:
-        html += ' <a href="/Org/' + str(orgid) + '" target="_blank" rel="noopener">#' + str(orgid) + '</a>'
-    html += '</h3>'
+        people = _org_members([orgid])
+    html = _vol_card_open(anchor, title, _people_n(people))
     if orgid <= 0:
         html += '<div class="empty-state">Set this Involvement # on the Config tab.</div>'
     else:
-        people = _org_members([orgid])
         html += _roster_table(
             people, '', can_write, 'SM ' + title, True, False, False, show_grade, show_grade)
-    html += '</div>'
+    html += _vol_card_close()
     return html
 
 
 def _view_volunteers(cfg, can_write):
     serving = _serving_outside(cfg)
+    sg_leaders, sg_coaches = _partition_leaders_and_coaches(cfg)
+    leaders_oid = _cfg_i(cfg, 'leaders_orgid')
+    coaches_g = _coaches_group_name(cfg)
     html = '<div class="cover-head"><h2>Volunteers</h2>'
-    html += '<p class="meta-line">Current members of the dedicated leader involvements. Onboarding stays in its own tool.</p></div>'
+    html += '<p class="meta-line">Refuge Leaders involvement: SG Leaders are members who are not in the Coaches SubGroup. Onboarding stays in its own tool.</p></div>'
+    vol_list_oid = _cfg_i(cfg, 'volunteer_list_orgid') or VOLUNTEER_LIST_ORGID
+    prospect_n = _prospect_count(vol_list_oid)
     html += '<div class="cover-cta">'
+    html += '<a class="vol-prospect-tile" href="/Org/' + str(vol_list_oid) + '" target="_blank" rel="noopener">'
+    html += '<span class="vol-prospect-n">' + str(prospect_n) + '</span>'
+    html += '<span class="vol-prospect-l">Prospects</span></a>'
     html += '<a class="btn-primary" href="' + _html(_s(cfg.get('onboarding_url'))) + '" target="_blank" rel="noopener">Open Volunteer Onboarding</a>'
     html += '</div>'
     html += _demo_subnav(
@@ -3087,19 +3441,42 @@ def _view_volunteers(cfg, can_write):
             ('sm-serving-beyond', 'Students Serving Beyond Refuge'),
         ],
         'Volunteers sections')
-    html += _vol_org_card(
-        'sm-vol-leaders', 'Volunteer Leaders', _cfg_i(cfg, 'leaders_orgid'), can_write, False)
-    html += _vol_org_card(
-        'sm-vol-coaches', 'SG Coaches', _cfg_i(cfg, 'coaches_orgid'), can_write, False)
+    html += _vol_card_open('sm-vol-leaders', 'Volunteer Leaders', _people_n(sg_leaders))
+    if leaders_oid <= 0:
+        html += '<div class="empty-state">Set the Refuge Leaders Involvement # on the Config tab.</div>'
+    else:
+        html += '<p class="meta-line">Combined involvement, excluding SubGroup ' + _html(coaches_g) + '.</p>'
+        html += _roster_table(
+            sg_leaders, '', can_write, 'SM Volunteer Leaders', True, False, False, False, False,
+            show_member_type=True)
+    html += _vol_card_close()
+    html += _vol_card_open('sm-vol-coaches', 'SG Coaches', _people_n(sg_coaches))
+    if leaders_oid <= 0:
+        html += '<div class="empty-state">Set the Refuge Leaders Involvement # on the Config tab.</div>'
+    else:
+        html += '<p class="meta-line">SubGroup ' + _html(coaches_g) + ' on the Refuge Leaders involvement.</p>'
+        html += _roster_table(
+            sg_coaches, '', can_write, 'SM SG Coaches', True, False, False, False, False,
+            show_member_type=True)
+    html += _vol_card_close()
     html += _vol_org_card(
         'sm-vol-students', 'Student Lead Team', _cfg_i(cfg, 'student_leaders_orgid'), can_write, True)
-    html += '<div class="vbs-card" id="sm-vol-campus"><h3>Campus Ministry</h3>'
-    html += '<div class="empty-state">Coming next.</div></div>'
-    html += '<div class="vbs-card" id="sm-serving-beyond"><h3>Students Serving Beyond Refuge</h3>'
+    campus_names = _campus_group_names(cfg)
+    campus_people = _campus_people(cfg) if campus_names else []
+    html += _vol_card_open('sm-vol-campus', 'Campus Ministry', _people_n(campus_people))
+    if not campus_names:
+        html += '<div class="empty-state">Set Campus Ministry small group names on the Config tab.</div>'
+    else:
+        html += '<p class="meta-line">SubGroups on MS/HS and leader involvements: '
+        html += _html(', '.join(campus_names)) + '.</p>'
+        html += _roster_table(
+            campus_people, '', can_write, 'SM Campus Ministry', True, False, False, True, True)
+    html += _vol_card_close()
+    html += _vol_card_open('sm-serving-beyond', 'Students Serving Beyond Refuge', _people_n(serving))
     html += '<p class="meta-line">Refuge standing members who are also in Volunteer Program '
     html += str(VOLUNTEER_PROGRAM_ID) + ' (or extra Org#s). Volunteer involvements are listed per student.</p>'
     html += _roster_table(serving, 'Volunteer involvements', can_write, 'SM Serving', True, True)
-    html += '</div>'
+    html += _vol_card_close()
     return html
 
 
@@ -3254,6 +3631,65 @@ def _person_in_group(person, group_name):
     return (',' + _s(group_name).lower() + ',') in g
 
 
+def _partition_leaders_and_coaches(cfg):
+    """Split the combined Refuge Leaders org: Coaches SubGroup vs everyone else."""
+    people = _org_members(_leader_orgs(cfg))
+    gname = _coaches_group_name(cfg)
+    leaders = []
+    coaches = []
+    for p in people or []:
+        if gname and _person_in_group(p, gname):
+            coaches.append(p)
+        else:
+            leaders.append(p)
+    return _sort_people(leaders), _sort_people(coaches)
+
+
+def _campus_people(cfg):
+    """Unique people on standing/leader orgs who are in Campus Ministry small groups."""
+    names = _campus_group_names(cfg)
+    if not names:
+        return []
+    people = _org_members(_standing_orgs(cfg) + _leader_orgs(cfg))
+    by_id = {}
+    order = []
+    for p in people or []:
+        matched = []
+        for gname in names:
+            if _person_in_group(p, gname):
+                matched.append(gname)
+        if not matched:
+            continue
+        pid = _i(p.get('people_id'))
+        if pid <= 0:
+            continue
+        if pid not in by_id:
+            rec = {}
+            for k in p:
+                rec[k] = p[k]
+            rec['groups'] = ', '.join(matched)
+            by_id[pid] = rec
+            order.append(pid)
+        else:
+            have = {}
+            for part in _s(by_id[pid].get('groups')).split(','):
+                part = part.strip()
+                if part:
+                    have[part.lower()] = part
+            for gname in matched:
+                if gname.lower() not in have:
+                    have[gname.lower()] = gname
+            bits = []
+            for gname in names:
+                if gname.lower() in have:
+                    bits.append(have[gname.lower()])
+            by_id[pid]['groups'] = ', '.join(bits)
+    out = []
+    for pid in order:
+        out.append(by_id[pid])
+    return _sort_people(out)
+
+
 def _sort_people(people):
     out = list(people or [])
     try:
@@ -3288,9 +3724,12 @@ def _group_member_table(people):
     html += '<th class="sm-sort" data-sort="num">Age</th>'
     html += '<th class="sm-sort" data-sort="text">Grade</th>'
     html += '<th class="sm-sort" data-sort="text">School District</th>'
+    html += '<th class="sm-sort col-allergy" data-sort="text">Allergies</th>'
+    html += '<th class="sm-sort col-contact" data-sort="text">Parents</th>'
+    html += '<th class="sm-sort col-contact" data-sort="text">Emergency</th>'
     html += '</tr></thead><tbody>'
     if not people:
-        html += '<tr><td colspan="6"><div class="empty-state">No students</div></td></tr>'
+        html += '<tr><td colspan="9"><div class="empty-state">No students</div></td></tr>'
     for p in people:
         first = _s(p.get('first')) or _s(p.get('name'))
         html += '<tr>'
@@ -3300,8 +3739,31 @@ def _group_member_table(people):
         html += '<td>' + _html(p.get('age')) + '</td>'
         html += '<td>' + _html(p.get('grade')) + '</td>'
         html += '<td>' + _html(p.get('school')) + '</td>'
+        html += '<td class="col-allergy">' + _html(_allergy_text(p)) + '</td>'
+        html += '<td class="col-contact">' + _parents_html(p) + '</td>'
+        html += '<td class="col-contact">' + _html(_emergency_text(p)) + '</td>'
         html += '</tr>'
     html += '</tbody></table></div>'
+    return html
+
+
+def _sg_toggle_bar():
+    html = '<div class="sg-col-toggles">'
+    html += '<button type="button" class="btn-col-toggle btn-col-toggle-allergy" data-col="allergy" aria-pressed="false">Allergies</button>'
+    html += '<button type="button" class="btn-col-toggle" data-col="contact" aria-pressed="false">Parent &amp; emergency contacts</button>'
+    html += '</div>'
+    return html
+
+
+def _sg_section_toolbar(print_which, print_label, show_toggles=False):
+    html = '<div class="sg-col-toolbar sm-screen-only">'
+    if show_toggles:
+        html += '<p class="meta-line" style="margin:0">Toggle extra columns, then print landscape Letter.</p>'
+    html += '<div class="sg-col-actions">'
+    html += '<button type="button" class="btn-print" data-print="' + _html(print_which) + '">' + _html(print_label) + '</button>'
+    if show_toggles:
+        html += _sg_toggle_bar()
+    html += '</div></div>'
     return html
 
 
@@ -3343,6 +3805,7 @@ def _group_block_html(gname, leaders, students, can_write, idx=0, total=1):
     html += '</div>'
     html += _tag_add_button(leaders + students, 'SM ' + gname, can_write)
     html += '</div>'
+    html += '<h2 class="sg-print-heading sg-print-only">' + _html(gname) + '</h2>'
     html += '<div class="sg-block-body demo-row-body">'
     html += '<div class="sg-leader-row"><span class="sg-leader-label">Leaders</span><span>'
     if leaders:
@@ -3367,13 +3830,16 @@ def _view_groups(cfg, can_write):
     q = _s(_form_val('q'))
     filtered = _filter_people(students, grade_f, gender_f, q)
 
-    html = '<div class="cover-head"><h2>Small Groups</h2>'
+    html = '<div class="cover-head sm-screen-only"><h2>Small Groups</h2>'
     html += '<p class="meta-line">Same SubGroup name on student and leader involvements. Assign can add a second group; Move replaces one name.</p></div>'
     html += _demo_subnav(
         [('sm-sg-groups', 'Groups'), ('sm-sg-assign', 'Assign')],
         'Small Groups sections')
 
+    html += '<div id="sm-sg-root" class="sg-print-view">'
+    html += '<div class="sg-print-header sg-print-only">Student Ministry Central — Small Groups</div>'
     html += '<div id="sm-sg-groups" class="sg-stack">'
+    html += _sg_section_toolbar('groups', 'Print Groups — landscape Letter', True)
     if not names:
         html += '<div class="empty-state">No groups yet. Create one below.</div>'
     nlen = 0
@@ -3395,11 +3861,14 @@ def _view_groups(cfg, can_write):
         gi += 1
     html += '</div>'
 
-    html += '<div class="vbs-card" id="sm-sg-assign"><h3>Assign</h3>'
+    html += '<div class="vbs-card" id="sm-sg-assign"><h3 class="sm-screen-only">Assign</h3>'
+    html += '<h2 class="sg-print-heading sg-print-only">Assign</h2>'
+    html += _sg_section_toolbar('assign', 'Print Assign — landscape Letter')
     if not can_write:
-        html += '<p class="meta-line">View only — assignments are disabled.</p>'
-    html += '<form method="get" action="' + _script_path() + '" class="filter-bar">'
+        html += '<p class="meta-line sm-screen-only">View only — assignments are disabled.</p>'
+    html += '<form method="get" action="' + _script_path() + '#sm-sg-assign" class="filter-bar sm-screen-only">'
     html += '<input type="hidden" name="view" value="groups" />'
+    html += '<input type="hidden" name="section" value="sm-sg-assign" />'
     html += '<input type="search" name="q" value="' + _html(q) + '" placeholder="Search name" />'
     html += '<select name="grade"><option value="">All grades</option>'
     for g in _unique_values(students, 'grade'):
@@ -3413,9 +3882,10 @@ def _view_groups(cfg, can_write):
     html += '<button type="submit" class="btn-secondary">Filter list</button></form>'
     html += '<form method="post" action="' + _script_path() + '" class="assign-form">'
     html += '<input type="hidden" name="view" value="groups" />'
+    html += '<div class="sm-screen-only">'
     html += '<div class="filter-bar">'
     html += '<select name="group_name"><option value="">Choose group</option>'
-    for gname in names:
+    for gname in _assign_group_names(cfg):
         html += '<option value="' + _html(gname) + '">' + _html(gname) + '</option>'
     html += '</select>'
     html += '<input type="text" name="new_group" placeholder="New group name" />'
@@ -3426,13 +3896,28 @@ def _view_groups(cfg, can_write):
         html += '<button type="submit" name="action" value="sg_remove" class="btn-secondary">Remove from group</button>'
         html += '<label class="option-row"><input type="checkbox" name="add_only" value="1" checked /> Keep existing groups (add)</label>'
     html += '</div>'
-    html += '<p class="meta-line">Select people below. Add keeps other groups. Move clears known group tags on that person, then assigns the new one. Remove drops the chosen group only.</p>'
-    html += '<h4>Students</h4>'
+    html += '<p class="meta-line">Select people below. Add keeps other groups. Move clears student group tags, then assigns the new one (Coaches SubGroup is kept). Remove drops the chosen group only. The Coaches SubGroup from Config is in this list even if it was created on the involvement.</p>'
+    html += '</div>'
+    stu_n = 0
+    try:
+        stu_n = len(filtered)
+    except:
+        stu_n = 0
+    html += '<div class="sg-assign-fold demo-row">'
+    html += '<button type="button" class="demo-row-caret" aria-expanded="true">'
+    html += '<span class="demo-row-title">Students (' + str(stu_n) + ')</span>'
+    html += '<i class="fa fa-caret-down" aria-hidden="true"></i></button>'
+    html += '<div class="demo-row-body">'
     html += _roster_table(filtered, '', can_write, 'SM Assign', True, False, True)
-    html += '<h4>Leaders (from dedicated involvements)</h4>'
+    html += '</div></div>'
+    leader_oids = _sg_assign_leader_orgs(cfg)
+    leader_titles = _org_names_ordered(leader_oids)
+    html += '<h4>' + _html(' · '.join(leader_titles) or 'Leaders') + '</h4>'
     html += _roster_table(
-        _org_members(_sg_assign_leader_orgs(cfg)), '', can_write, 'SM Leaders', True, False, True)
+        _org_members(leader_oids), '', can_write, 'SM Leaders', True, False, True,
+        show_grade=False, show_member_type=True)
     html += '</form></div>'
+    html += '</div>'
     return html
 
 
@@ -3466,9 +3951,16 @@ def _view_config(cfg):
     html += _cfg_field(cfg, 'event_date_extra', 'Event date Extra Value name', 'Not used for When. When uses First/Last meeting dates on the involvement.')
     html += '</div>'
     html += '<div class="vbs-card"><h3>Leader involvements</h3>'
-    html += _cfg_field(cfg, 'leaders_orgid', 'Volunteer Leaders Org#')
-    html += _cfg_field(cfg, 'coaches_orgid', 'SG Coaches Org#')
+    html += _cfg_field(
+        cfg, 'leaders_orgid', 'Refuge Leaders Org#',
+        'Combined involvement. SG Coaches are a SubGroup on this org, not a separate involvement.')
+    html += _cfg_field(
+        cfg, 'coaches_group_name', 'SG Coaches SubGroup',
+        'MemberTag / SubGroup name on the Refuge Leaders involvement. FCC default: Refuge Coaches')
     html += _cfg_field(cfg, 'student_leaders_orgid', 'Student Lead Team Org#')
+    html += _cfg_field(
+        cfg, 'campus_group_names', 'Campus Ministry small groups',
+        'Comma-separated SubGroup names. FCC default: YCI Leadership, FCA Leadership')
     html += '</div>'
     html += '<div class="vbs-card"><h3>Keywords &amp; URLs</h3>'
     html += _cfg_field(cfg, 'kw_decision', 'Decision keyword')
@@ -3484,6 +3976,9 @@ def _view_config(cfg):
     html += _cfg_field(cfg, 'awana_division_id', 'Awana Division Id')
     html += _cfg_field(cfg, 'senior_year_orgid', 'Senior Year Org# (0 = placeholder)')
     html += _cfg_field(cfg, 'volunteer_program_id', 'Volunteer Program Id (serving outside)', 'FCC default 1120')
+    html += _cfg_field(
+        cfg, 'volunteer_list_orgid', 'Volunteer list Org# (Prospects tile)',
+        'FCC default 85 — count of Prospect member type')
     html += _cfg_field(cfg, 'volunteer_extra_orgids', 'Extra volunteer Org#s (comma-separated)')
     html += _cfg_field(cfg, 'view_only_role', 'View Only role name')
     html += _cfg_field(cfg, 'small_group_names', 'Known small group names (comma-separated)')
@@ -3523,6 +4018,7 @@ def _css():
     gy = BRAND['gray']
     dg = BRAND['dark-gray']
     ar = BRAND['artisan']
+    az = BRAND['azure']
     return (
         '.sm-root{display:block!important;visibility:visible!important;max-width:1400px;margin:0 auto;'
         'padding:20px;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;'
@@ -3542,7 +4038,9 @@ def _css():
         '.btn-refresh:hover{background:' + gy + '}'
         '.dash-nav{text-align:center;margin:0 0 14px;background:' + wt + ';border:1px solid ' + gy + ';border-radius:10px;'
         'padding:8px 10px;box-shadow:0 1px 4px rgba(20,40,60,.06);position:relative}'
-        '.dash-nav-caret{position:absolute;top:4px;right:6px;width:22px;height:22px;border:none;background:transparent;'
+        '.dash-nav-caret{position:absolute;top:4px;right:6px;width:24px;height:24px;padding:0;'
+        'display:inline-flex;align-items:center;justify-content:center;'
+        'border:1px solid ' + ny + ';background:' + wt + ';border-radius:4px;'
         'color:' + ny + ';cursor:pointer}'
         '.dash-nav.is-collapsed .dash-nav-body{display:none!important}'
         '.dash-nav-body,.dash-nav-segment,.dash-tabs{text-align:center;justify-content:center}'
@@ -3592,7 +4090,9 @@ def _css():
         '.demo-row-caret{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;'
         'border:none;background:transparent;padding:0 0 8px;cursor:default;color:' + ny + ';text-align:left}'
         '.demo-row-title{margin:0;font-size:18px;font-weight:700;color:' + ny + '}'
-        '.demo-row-caret i{display:none;color:' + ny + ';font-size:16px}'
+        '.demo-row-caret i,.sg-caret i{display:none;color:' + ny + ';font-size:13px;line-height:18px;'
+        'width:20px;height:20px;box-sizing:border-box;text-align:center;'
+        'border:1px solid ' + ny + ';background:' + wt + ';border-radius:4px}'
         '.fq-block{margin:0 0 10px}'
         '.demo-row-caret.fq-caret{justify-content:center;cursor:pointer;padding:4px 0 8px}'
     '.fq-title{margin:0;font-size:16px;font-weight:700;color:' + ny + ';text-align:center}'
@@ -3679,10 +4179,24 @@ def _css():
         '.sg-caret{display:flex;align-items:center;gap:8px;border:none;background:transparent;padding:0;'
         'cursor:pointer;color:' + ny + ';text-align:left;flex:0 1 auto;width:auto}'
         '.sg-title{margin:0;font-size:18px;font-weight:700;color:' + ny + '}'
-        '.sg-caret i{display:inline-block;color:' + ny + ';font-size:16px}'
+        '.sg-caret i{display:inline-block}'
         '.sg-block.is-collapsed .sg-caret i{transform:none}'
         '.sg-block:not(.is-collapsed) .sg-caret i{transform:rotate(180deg)}'
         '.sg-block.is-collapsed .sg-block-body{display:none!important}'
+        '.sg-assign-fold,.vol-fold{margin:0 0 16px}'
+        '.sg-assign-fold .demo-row-caret,.vol-fold .demo-row-caret{cursor:pointer;padding:4px 0}'
+        '.sg-assign-fold .demo-row-caret i,.vol-fold .demo-row-caret i{display:inline-block}'
+        '.sg-assign-fold.is-collapsed .demo-row-body,.vol-fold.is-collapsed .demo-row-body{display:none!important}'
+        '.sg-assign-fold.is-collapsed .demo-row-caret i,.vol-fold.is-collapsed .demo-row-caret i{transform:none}'
+        '.sg-assign-fold:not(.is-collapsed) .demo-row-caret i,'
+        '.vol-fold:not(.is-collapsed) .demo-row-caret i{transform:rotate(180deg)}'
+        '.vol-fold-head{display:flex;align-items:center;gap:10px;margin:0 0 8px}'
+        '.vol-fold.is-collapsed .vol-fold-head{margin-bottom:0}'
+        '.vol-fold-count{flex:0 0 auto;min-width:1.4em;font-size:13px;font-weight:600;'
+        'color:' + ny + ';opacity:.45;text-align:right;line-height:1}'
+        '.vol-fold-head .demo-row-title{flex:0 1 auto}'
+        '.vol-fold-head .demo-row-caret{width:auto;flex:0 0 auto;margin-left:auto;padding:0;'
+        'justify-content:center}'
         '.sg-stats{display:grid;grid-template-columns:repeat(4,minmax(70px,1fr));gap:8px;flex:1;min-width:220px}'
         '.sg-stat{background:' + gy + ';border-radius:8px;text-align:center;padding:8px 6px}'
         '.sg-stat-n{font-size:20px;font-weight:700;color:' + ny + ';line-height:1.1}'
@@ -3694,7 +4208,30 @@ def _css():
         '.sg-leader-row a{color:' + ny + ';font-weight:600;text-decoration:none}'
         '.sg-leader-row a:hover{text-decoration:underline}'
         '.sg-block .btn-tag-add{margin-left:auto}'
-        '.cover-cta{margin:0 0 14px}'
+        '.sg-print-only{display:none}'
+        '.sg-col-toolbar{margin:0 0 12px}'
+        '.sg-col-actions{display:flex;flex-direction:column;align-items:flex-start;gap:8px;margin-top:8px}'
+        '.sg-col-toggles{display:flex;flex-wrap:wrap;gap:8px;align-items:center}'
+        '.btn-print{background:' + ny + ';color:' + wt + '!important;border:none;border-radius:8px;'
+        'padding:8px 14px;font-weight:700;cursor:pointer;font-size:13px}'
+        '.btn-print:hover{opacity:.92}'
+        '.btn-col-toggle{background:' + wt + ';color:' + ny + '!important;border:1px solid #E2E5E8;'
+        'border-radius:6px;padding:6px 12px;font-size:13px;font-weight:600;cursor:pointer}'
+        '.btn-col-toggle:hover{border-color:' + ny + '}'
+        '.btn-col-toggle.is-on{background:' + ny + ';color:' + wt + '!important;border-color:' + ny + '}'
+        '.btn-col-toggle-allergy.is-on{background:' + ar + ';color:' + wt + '!important;border-color:' + ar + '}'
+        '.sg-print-view:not(.show-allergy) .col-allergy{display:none!important}'
+        '.sg-print-view:not(.show-contact) .col-contact{display:none!important}'
+        '.sg-print-view.show-allergy th.col-allergy,.sg-print-view.show-allergy td.col-allergy{'
+        'background:#fee2e2!important;color:#7f1d1d!important}'
+        '.cover-cta{margin:0 0 14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}'
+        '.vol-prospect-tile{display:inline-flex;flex-direction:column;align-items:center;justify-content:center;'
+        'min-width:72px;padding:6px 12px;background:' + wt + ';color:' + ny + '!important;'
+        'border:2px solid ' + az + ';border-radius:8px;text-decoration:none!important;line-height:1.1}'
+        '.vol-prospect-n{font-size:22px;font-weight:700;color:' + ny + '}'
+        '.vol-prospect-l{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;'
+        'color:' + ny + ';margin-top:2px}'
+        '.vol-prospect-tile:hover{background:' + gy + '}'
         '.sm-root .tag-modal-overlay{display:none!important;position:fixed;inset:0;background:rgba(20,40,60,.45);'
         'z-index:40;align-items:center;justify-content:center}'
         '.sm-root .tag-modal-overlay.visible{display:flex!important}'
@@ -3731,12 +4268,51 @@ def _css():
         '.sg-block .btn-tag-add{margin-left:0}'
         '.sg-block.is-collapsed .sg-caret i{transform:none}'
         '.sg-block:not(.is-collapsed) .sg-caret i{transform:rotate(180deg)}'
+        '.vol-fold.is-collapsed .demo-row-caret i{transform:none}'
+        '.vol-fold:not(.is-collapsed) .demo-row-caret i{transform:rotate(180deg)}'
+        '.sg-assign-fold.is-collapsed .demo-row-caret i{transform:none}'
+        '.sg-assign-fold:not(.is-collapsed) .demo-row-caret i{transform:rotate(180deg)}'
         '.group-grid{grid-template-columns:1fr}'
         '.cfg-form .vbs-card{grid-template-columns:1fr}'
         '.filter-bar,.assign-form .filter-bar,.list-actions{flex-direction:column;align-items:stretch}'
         '.filter-bar input,.filter-bar select,.cfg-field input{width:100%;box-sizing:border-box}'
         '.people-table{font-size:12px}'
         '.table-scroll{-webkit-overflow-scrolling:touch}'
+        '}'
+        '@media print{'
+        '@page{size:landscape letter;margin:.75in}'
+        '.navbar,.navbar-fixed-top,.breadcrumb,.page-header,.box-header,#header,'
+        'header.main-header,.main-header,.sidebar,.main-sidebar,.control-sidebar,footer,.footer{'
+        'display:none!important}'
+        '.sm-screen-only,.sm-root .dashboard-header,.sm-root .dash-nav,.sm-root .demo-subnav,'
+        '.sm-root .tag-modal-overlay,.sg-col-toolbar,.sg-order,.btn-tag-add,.list-actions{'
+        'display:none!important}'
+        '.sg-print-only{display:block!important}'
+        '.sg-print-header{font-size:11pt;font-weight:700;color:#000;border-bottom:1px solid #999;'
+        'padding:0 0 8px;margin:0 0 12px}'
+        '.sg-print-heading{font-size:18pt;font-weight:700;color:#000;margin:0 0 10px}'
+        '.sm-root{max-width:none;padding:0;background:#fff!important;color:#000!important}'
+        '.vbs-card,.sg-block{box-shadow:none!important;border:1px solid #cbd5e1;background:#fff!important}'
+        '.sg-block{page-break-after:always;page-break-inside:avoid;margin:0 0 12px;padding:10px 0}'
+        '.sg-block:last-child{page-break-after:auto}'
+        '.sg-block-header{display:none!important}'
+        '.sg-block.is-collapsed .sg-block-body,.sg-block .sg-block-body{display:block!important}'
+        '.sg-assign-fold.is-collapsed .demo-row-body,.vol-fold.is-collapsed .demo-row-body{display:block!important}'
+        '.vol-fold-head .demo-row-caret i{display:none!important}'
+        '.sg-leader-row{background:#fff!important;border-left:2px solid #000;color:#000}'
+        '.people-table th,.people-table td{padding:5px 6px!important;font-size:10pt!important;color:#000!important;'
+        'border-bottom:1px solid #ccc}'
+        '.people-table th{background:#eee!important}'
+        '.people-table a{color:#000!important;text-decoration:none!important}'
+        '.table-scroll{overflow:visible!important}'
+        '.sm-root.sm-print-groups #sm-sg-assign{display:none!important}'
+        '.sm-root.sm-print-assign #sm-sg-groups{display:none!important}'
+        '.sm-root.sm-print-assign .sg-block{page-break-after:auto}'
+        '.sg-print-view:not(.show-allergy) .col-allergy{display:none!important}'
+        '.sg-print-view:not(.show-contact) .col-contact{display:none!important}'
+        '.sg-print-view.show-allergy th.col-allergy,.sg-print-view.show-allergy td.col-allergy{'
+        'background:#fee2e2!important;color:#7f1d1d!important;'
+        '-webkit-print-color-adjust:exact;print-color-adjust:exact}'
         '}'
     )
 
@@ -3749,6 +4325,33 @@ def _page_script():
         "function $(s,r){return (r||document).querySelector(s);}"
         "function addClass(el,c){if(el) el.className=(el.className+' '+c).replace(/^\\s+|\\s+$/g,'');}"
         "function removeClass(el,c){if(!el)return;el.className=(' '+el.className+' ').replace(' '+c+' ',' ').replace(/^\\s+|\\s+$/g,'');}"
+        "function hasClass(el,c){return !!(el&&(' '+el.className+' ').indexOf(' '+c+' ')>=0);}"
+        "function initSgColToggles(){var root=document.getElementById('sm-sg-root');if(!root)return;"
+        "var KEYA='sm-sg-show-allergy';var KEYC='sm-sg-show-contact';"
+        "function apply(col,on){var cls=col==='allergy'?'show-allergy':'show-contact';"
+        "if(on)addClass(root,cls);else removeClass(root,cls);"
+        "var btns=root.querySelectorAll('.btn-col-toggle[data-col=\"'+col+'\"]');"
+        "for(var i=0;i<btns.length;i++){if(on)addClass(btns[i],'is-on');else removeClass(btns[i],'is-on');"
+        "btns[i].setAttribute('aria-pressed',on?'true':'false');}}"
+        "function read(key){try{return window.localStorage&&localStorage.getItem(key)==='1';}catch(e){return false;}}"
+        "function write(key,on){try{if(window.localStorage)localStorage.setItem(key,on?'1':'0');}catch(e){}}"
+        "apply('allergy',read(KEYA));apply('contact',read(KEYC));"
+        "var toggles=root.querySelectorAll('.btn-col-toggle');"
+        "for(var t=0;t<toggles.length;t++){toggles[t].addEventListener('click',function(e){"
+        "e.preventDefault();e.stopPropagation();var col=this.getAttribute('data-col')||'';"
+        "if(col!=='allergy'&&col!=='contact')return;"
+        "var on=!hasClass(root,col==='allergy'?'show-allergy':'show-contact');"
+        "apply(col,on);write(col==='allergy'?KEYA:KEYC,on);});}}"
+        "function printSg(which){var root=document.querySelector('.sm-root');"
+        "if(!root){window.print();return;}"
+        "removeClass(root,'sm-print-groups');removeClass(root,'sm-print-assign');"
+        "addClass(root,which==='assign'?'sm-print-assign':'sm-print-groups');"
+        "var blocks=document.querySelectorAll('.sg-block');"
+        "for(var i=0;i<blocks.length;i++)removeClass(blocks[i],'is-collapsed');"
+        "setTimeout(function(){window.print();},50);}"
+        "if(window.addEventListener)window.addEventListener('afterprint',function(){"
+        "var root=document.querySelector('.sm-root');if(!root)return;"
+        "removeClass(root,'sm-print-groups');removeClass(root,'sm-print-assign');});"
         "var pending=[];"
         "function parseIds(csv){var o=[],s={};String(csv||'').split(',').forEach(function(x){var n=parseInt(x,10);if(n>0&&!s[n]){s[n]=1;o.push(n);}});return o;}"
         "function tagSource(){var r=document.querySelector('input[name=tag-source]:checked');return r?r.value:'new';}"
@@ -3783,6 +4386,10 @@ def _page_script():
         "x.send(body);}"
         "document.addEventListener('click',function(e){var t=e.target;"
         "var order=t;while(order&&order!==document){if(order.className&&(' '+order.className+' ').indexOf(' sg-order ')>=0)return;order=order.parentNode;}"
+        "var bar=t;while(bar&&bar!==document){if(bar.className&&(' '+bar.className+' ').indexOf(' sg-col-toolbar ')>=0){"
+        "var btn=t;while(btn&&btn!==bar){if(btn.className&&(' '+btn.className+' ').indexOf(' btn-print ')>=0){"
+        "e.preventDefault();printSg(btn.getAttribute('data-print')||'groups');return;}btn=btn.parentNode;}"
+        "return;}bar=bar.parentNode;}"
         "while(t&&t!==document){if(t.className&&(' '+t.className+' ').indexOf(' btn-tag-add ')>=0){e.preventDefault();openTag(parseIds(t.getAttribute('data-people-ids')),t.getAttribute('data-tag-suggest')||'');return;}"
         "if(t.id==='btn-tag-cancel'){e.preventDefault();closeTag();return;}"
         "if(t.id==='btn-tag-confirm'){e.preventDefault();submitTag();return;}"
@@ -3826,7 +4433,9 @@ def _page_script():
         "if(lk==='coaches')sec='sm-vol-coaches';else if(lk==='students')sec='sm-vol-students';"
         "else if(lk==='campus')sec='sm-vol-campus';else if(lk==='serving')sec='sm-serving-beyond';"
         "else if(lk==='leaders')sec='sm-vol-leaders';}"
-        "else if(/[?&](grade|gender|school|q)=/.test(qs)&&/[?&]view=demographics/.test(qs))sec='sm-filtered-list';}catch(e4){}}"
+        "else if(/[?&](grade|gender|school|q)=/.test(qs)&&/[?&]view=demographics/.test(qs))sec='sm-filtered-list';"
+        "else if(/[?&]view=groups/.test(qs)&&/[?&](grade|gender|q|section)=/.test(qs))sec='sm-sg-assign';}catch(e4){}}"
+        "initSgColToggles();"
         "jumpTo(sec);"
         "}catch(err){}}"
         ")();"
